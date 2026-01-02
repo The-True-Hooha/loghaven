@@ -13,12 +13,16 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    #[command(visible_alias = "i")]
     Init,
-
+    
+    #[command(visible_alias = "r")]
     Run,
-
+    
+    #[command(visible_alias = "s")]
     Status,
-
+    
+    #[command(visible_alias = "st")]
     Stop,
 }
 
