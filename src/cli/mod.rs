@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "loghaven")]
+#[command(version)]
 #[command(about = "Local-first observability runtime", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
