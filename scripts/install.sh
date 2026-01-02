@@ -1,9 +1,9 @@
-#!bin/sh
+#!/bin/sh
 
 set -e
 
 REPO="The-True-Hooha/loghaven"
-INSTALL_DIR="/usr/local/bin
+INSTALL_DIR="/usr/local/bin"
 
 get_latest_release() {
     curl --silent "https://api.github.com/repos/$REPO/releases/latest" |
@@ -28,6 +28,11 @@ detect_platform() {
                 arm64) echo "macos-arm64" ;;
                 *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
             esac
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            echo "Use PowerShell install script on Windows:" >&2
+            echo "  irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex" >&2
+            exit 1
             ;;
         *)
             echo "Unsupported OS: $OS" >&2
