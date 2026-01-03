@@ -1,14 +1,16 @@
+mod cli;
+use cli::Cli;
 use clap::Parser;
 
-use crate::cli::Cli;
+mod error;
+mod config;
 
-mod cli;
+
 fn main() {
     let cli = Cli::parse();
 
     if let Err(e) = cli::execute(cli) {
-        eprintln!("Error: {}", e);
-
+        cli::style::error(&format!("{}", e));
         std::process::exit(1);
     }
 }
