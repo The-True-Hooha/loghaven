@@ -166,48 +166,47 @@ impl Default for ChainsConfig {
 }
 
 impl Config {
-     pub fn load(path: &PathBuf) -> Result<Self> {
+    pub fn load(path: &PathBuf) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let mut config: Config = toml::from_str(&content)?;
-        
+
         config.apply_env_overrides()?;
-        
+
         Ok(config)
     }
-    
+
     pub fn save(&self, path: &PathBuf) -> Result<()> {
         let toml = toml::to_string_pretty(self)?;
-        
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        
+
         std::fs::write(path, toml)?;
         Ok(())
     }
-    
+
     pub fn validate(&self) -> Result<()> {
         validation::validate(self)
     }
-    
+
     fn apply_env_overrides(&mut self) -> Result<()> {
         if let Ok(backend) = std::env::var("LOGHAVEN_STORAGE_BACKEND") {
             self.storage.backend = backend;
         }
-        
+
         if let Ok(log_level) = std::env::var("LOGHAVEN_LOG_LEVEL") {
             self.agent.log_level = log_level;
         }
-        
+
         if let Ok(port) = std::env::var("LOGHAVEN_DAEMON_PORT") {
-            self.daemon.tcp_port = port.parse()
+            self.daemon.tcp_port = port
+                .parse()
                 .map_err(|_| LogHavenError::Env("Invalid port number".to_string()))?;
         }
-        
+
         Ok(())
     }
-
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

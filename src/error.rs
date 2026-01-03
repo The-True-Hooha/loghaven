@@ -15,7 +15,7 @@ pub enum LogHavenError {
     TomlSerialize(#[from] toml::ser::Error),
 
     #[error("storage error: {0}")]
-    #[allow(dead_code)]  
+    #[allow(dead_code)]
     Storage(String),
 
     #[error("Environment variable error: {0}")]
