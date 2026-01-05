@@ -23,7 +23,7 @@ LEARN MORE:
 #[command(about = "Local-first observability runtime for on-chain and off-chain systems")]
 #[command(long_about = None)]
 #[command(after_help = AFTER_HELP)]
-#[command(disable_help_subcommand = true)] 
+#[command(disable_help_subcommand = true)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -70,18 +70,17 @@ pub enum Commands {
 
 pub fn execute(cli: Cli) -> crate::error::Result<()> {
     match cli.command {
-         Some(Commands::Init { force, storage, profile }) => {
-            commands::init(force, storage, profile.as_deref())
-        }
-        Some(Commands::Run { foreground, profile }) => {
-            commands::run(foreground, profile.as_deref())
-        }
-        Some(Commands::Status { profile }) => {
-            commands::status(profile.as_deref())
-        }
-        Some(Commands::Stop { force, profile }) => {
-            commands::stop(force, profile.as_deref())
-        }
+        Some(Commands::Init {
+            force,
+            storage,
+            profile,
+        }) => commands::init(force, storage, profile.as_deref()),
+        Some(Commands::Run {
+            foreground,
+            profile,
+        }) => commands::run(foreground, profile.as_deref()),
+        Some(Commands::Status { profile }) => commands::status(profile.as_deref()),
+        Some(Commands::Stop { force, profile }) => commands::stop(force, profile.as_deref()),
         None => {
             style::print_banner();
             println!("Run 'loghaven --help' for usage information\n");

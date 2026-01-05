@@ -1,10 +1,11 @@
 mod cli;
-use cli::Cli;
 use clap::Parser;
+use cli::Cli;
 
-mod error;
 mod config;
-
+mod daemon;
+mod error;
+mod ipc;
 
 fn main() {
     let cli = Cli::parse();

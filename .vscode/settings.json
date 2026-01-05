@@ -1,3 +1,7 @@
 {
-  "cSpell.words": ["gogahlabs", "loghaven"]
+  "cSpell.words": ["gogahlabs", "loghaven"],
+  "rust-analyzer.rustfmt.overrideCommand": ["cargo", "fmt", "--"],
+  "[rust]": {
+    "editor.formatOnSave": true
+  }
 }

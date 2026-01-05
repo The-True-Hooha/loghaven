@@ -1,9 +1,27 @@
 #!/bin/sh
-
 set -e
 
 REPO="The-True-Hooha/loghaven"
 INSTALL_DIR="/usr/local/bin"
+
+CYAN='\033[0;36m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+print_logo() {
+    echo "${CYAN}"
+    cat << "EOF"
+██╗      ██████╗  ██████╗ ██╗  ██╗ █████╗ ██╗   ██╗███████╗███╗   ██╗
+██║     ██╔═══██╗██╔════╝ ██║  ██║██╔══██╗██║   ██║██╔════╝████╗  ██║
+██║     ██║   ██║██║  ███╗███████║███████║██║   ██║█████╗  ██╔██╗ ██║
+██║     ██║   ██║██║   ██║██╔══██║██╔══██║╚██╗ ██╔╝██╔══╝  ██║╚██╗██║
+███████╗╚██████╔╝╚██████╔╝██║  ██║██║  ██║ ╚████╔╝ ███████╗██║ ╚████║
+╚══════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝
+EOF
+    echo "${NC}"
+    echo ""
+}
 
 get_latest_release() {
     curl --silent "https://api.github.com/repos/$REPO/releases/latest" |
@@ -30,7 +48,7 @@ detect_platform() {
             esac
             ;;
         MINGW*|MSYS*|CYGWIN*)
-            echo "Use PowerShell install script on Windows:" >&2
+            echo "${YELLOW}Use PowerShell install script on Windows:${NC}" >&2
             echo "  irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex" >&2
             exit 1
             ;;
@@ -42,10 +60,13 @@ detect_platform() {
 }
 
 main() {
+    print_logo
+    
     PLATFORM=$(detect_platform)
     VERSION=${1:-$(get_latest_release)}
     
-    echo "Installing LogHaven $VERSION for $PLATFORM..."
+    echo "${YELLOW}Installing LogHaven $VERSION for $PLATFORM...${NC}"
+    echo ""
     
     BINARY_URL="https://github.com/$REPO/releases/download/$VERSION/loghaven-$PLATFORM"
     TEMP_FILE=$(mktemp)
@@ -60,10 +81,13 @@ main() {
         sudo mv "$TEMP_FILE" "$INSTALL_DIR/loghaven"
     fi
     
-    echo "✓ LogHaven installed to $INSTALL_DIR/loghaven"
+    echo "${GREEN}✓ LogHaven installed to $INSTALL_DIR/loghaven${NC}"
     echo ""
-    echo "Verify installation:"
+    echo "${GREEN}Installation complete!${NC}"
+    echo ""
+    echo "${CYAN}Verify installation:${NC}"
     echo "  loghaven --version"
+    echo "  loghaven init"
 }
 
 main "$@"
