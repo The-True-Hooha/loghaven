@@ -91,22 +91,34 @@ pub fn run(foreground: bool, profile: Option<&str>) -> Result<()> {
 }
 
 pub fn status(profile: Option<&str>) -> Result<()> {
-    let config_path = config::get_config_path(profile);
-
-    style::step("Checking agent status...");
-
-    if !config_path.exists() {
-        style::warning("No configuration found");
-        return Ok(());
-    }
+    style::step("Checking daemon status...");
 
     match DaemonProcess::is_running(profile)? {
-        Some(pid) => {
-            style::success(&format!("Daemon is running (PID: {})", pid));
-            // TODO - get the daemon active status
+        Some(_) => {
+            let config_path = config::get_config_path(profile);
+            let cfg = Config::load(&config_path)?;
+
+            let rt = tokio::runtime::Runtime::new()?;
+            let response = rt.block_on(async {
+                let client =
+                    crate::ipc::IpcClient::new(cfg.daemon.socket_path.clone(), cfg.daemon.tcp_port);
+                client.send(crate::ipc::Request::Status).await
+            })?;
+
+            if response.success {
+                if let Some(crate::ipc::protocol::ResponseData::Status(data)) = response.data {
+                    style::success(&format!("Daemon is running (PID: {})", data.pid));
+                    println!("  Version: {}", data.version);
+                    println!("  Uptime: {}s", data.uptime);
+                    println!("  Storage: {}", data.storage_backend);
+                    println!("  Log Level: {}", data.log_level);
+                }
+            } else {
+                style::error(&format!("Error: {}", response.error.unwrap_or_default()));
+            }
         }
         None => {
-            style::info("Agent is not running");
+            style::info("Daemon is not running");
         }
     }
 
@@ -115,20 +127,39 @@ pub fn status(profile: Option<&str>) -> Result<()> {
 
 pub fn stop(force: bool, profile: Option<&str>) -> Result<()> {
     style::step("Stopping daemon...");
-    
+
     match DaemonProcess::is_running(profile)? {
         Some(_) => {
             if force {
                 style::warning("Force stopping daemon");
+                DaemonProcess::kill(profile)?;
+            } else {
+                // Send graceful stop via IPC
+                let config_path = config::get_config_path(profile);
+                let cfg = Config::load(&config_path)?;
+
+                let rt = tokio::runtime::Runtime::new()?;
+                rt.block_on(async {
+                    let client = crate::ipc::IpcClient::new(
+                        cfg.daemon.socket_path.clone(),
+                        cfg.daemon.tcp_port,
+                    );
+                    client.send(crate::ipc::Request::Stop).await
+                })?;
+
+                // Wait a bit for graceful shutdown
+                std::thread::sleep(std::time::Duration::from_secs(1));
+
+                // Clean up PID file
+                DaemonProcess::remove_pid(profile)?;
             }
-            
-            DaemonProcess::kill(profile)?;
+
             style::success("Daemon stopped");
         }
         None => {
             style::info("Daemon is not running");
         }
     }
-    
+
     Ok(())
 }

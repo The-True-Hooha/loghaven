@@ -35,10 +35,12 @@ impl DaemonState {
         self.status = DaemonStatus::Running
     }
 
+    #[allow(dead_code)]
     pub fn mark_stopping(&mut self) {
         self.status = DaemonStatus::Stopping
     }
 
+    #[allow(dead_code)]
     pub fn uptime(&self) -> u64 {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

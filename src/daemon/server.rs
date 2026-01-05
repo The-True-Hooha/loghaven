@@ -1,3 +1,4 @@
+use super::super::ipc::protocol::{Request, Response, ResponseData, StatusData};
 use crate::config::Config;
 use crate::error::{LogHavenError, Result};
 use std::path::PathBuf;
@@ -8,6 +9,7 @@ use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 
+#[allow(dead_code)]
 pub struct DaemonServer {
     socket_path: PathBuf,
     tcp_port: u16,
@@ -88,21 +90,24 @@ impl DaemonServer {
     }
 
     fn handle_request(request: &str) -> String {
-        match request.trim() {
-            "status" => serde_json::json!({
-                "status": "running",
-                "uptime": 0,
-                "version": env!("CARGO_PKG_VERSION")
-            })
-            .to_string(),
-            "stop" => serde_json::json!({
-                "message": "Shutting down"
-            })
-            .to_string(),
-            _ => serde_json::json!({
-                "error": "Unknown command"
-            })
-            .to_string(),
-        }
+        let response = match serde_json::from_str::<Request>(request.trim()) {
+            Ok(Request::Status) => Response::success(ResponseData::Status(StatusData {
+                pid: std::process::id(),
+                uptime: 0,
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                status: "running".to_string(),
+                storage_backend: "local".to_string(),
+                log_level: "info".to_string(),
+            })),
+            Ok(Request::Stop) => {
+                Response::success(ResponseData::Message("Shutting down".to_string()))
+            }
+            Ok(Request::Reload) => {
+                Response::success(ResponseData::Message("Configuration reloaded".to_string()))
+            }
+            Err(_) => Response::error("Invalid request".to_string()),
+        };
+
+        serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string())
     }
 }

@@ -5,6 +5,7 @@ use cli::Cli;
 mod config;
 mod daemon;
 mod error;
+mod ipc;
 
 fn main() {
     let cli = Cli::parse();
