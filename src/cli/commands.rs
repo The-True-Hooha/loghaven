@@ -4,6 +4,8 @@ use super::style;
 use crate::config::{self, Config};
 use crate::error::Result;
 
+use crate::daemon::{Daemon, DaemonProcess};
+
 pub fn init(force: bool, storage: Option<String>, profile: Option<&str>) -> Result<()> {
     style::print_banner();
 
@@ -45,6 +47,12 @@ pub fn init(force: bool, storage: Option<String>, profile: Option<&str>) -> Resu
 pub fn run(foreground: bool, profile: Option<&str>) -> Result<()> {
     style::print_banner();
 
+    if let Some(pid) = DaemonProcess::is_running(profile)? {
+        style::warning(&format!("Daemon already running (PID: {})", pid));
+        style::info("use 'loghaven stop' top stop it first");
+        return Ok(());
+    }
+
     let config_path = config::get_config_path(profile);
 
     if !config_path.exists() {
@@ -59,14 +67,24 @@ pub fn run(foreground: bool, profile: Option<&str>) -> Result<()> {
     style::step("Validating configuration...");
     cfg.validate()?;
 
-    if foreground {
+    if !foreground {
+        style::step("starting daemon in background...");
+        DaemonProcess::daemonize()?;
+    } else {
         style::info("Running in foreground mode");
     }
+
+    DaemonProcess::write_pid(profile)?;
 
     style::success(&format!("Using storage backend: {}", cfg.storage.backend));
     style::success(&format!("Log level: {}", cfg.agent.log_level));
 
-    // TODO: Actual daemon startup
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let mut daemon = Daemon::new(cfg);
+        daemon.run().await
+    })?;
+
     style::success("Agent started");
 
     Ok(())
@@ -82,21 +100,35 @@ pub fn status(profile: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    // TODO: Actual status check
-    style::info("Agent is not running");
+    match DaemonProcess::is_running(profile)? {
+        Some(pid) => {
+            style::success(&format!("Daemon is running (PID: {})", pid));
+            // TODO - get the daemon active status
+        }
+        None => {
+            style::info("Agent is not running");
+        }
+    }
 
     Ok(())
 }
 
-pub fn stop(force: bool, _profile: Option<&str>) -> Result<()> {
-    style::step("Stopping LogHaven agent...");
-
-    if force {
-        style::warning("Force stopping agent");
+pub fn stop(force: bool, profile: Option<&str>) -> Result<()> {
+    style::step("Stopping daemon...");
+    
+    match DaemonProcess::is_running(profile)? {
+        Some(_) => {
+            if force {
+                style::warning("Force stopping daemon");
+            }
+            
+            DaemonProcess::kill(profile)?;
+            style::success("Daemon stopped");
+        }
+        None => {
+            style::info("Daemon is not running");
+        }
     }
-
-    // TODO: Actual daemon stop
-    style::success("Agent stopped");
-
+    
     Ok(())
 }

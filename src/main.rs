@@ -3,6 +3,7 @@ use clap::Parser;
 use cli::Cli;
 
 mod config;
+mod daemon;
 mod error;
 
 fn main() {
