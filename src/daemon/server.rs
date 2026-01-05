@@ -46,7 +46,7 @@ impl DaemonServer {
         let listener = UnixListener::bind(&self.socket_path)
             .map_err(|e| LogHavenError::Daemon(format!("Failed to bind socket: {}", e)))?;
 
-        println!("Daemon running and listening on {:?}", self.socket_path);
+        println!("Daemon listening on {:?}", self.socket_path);
 
         let start_time = self.start_time;
         let config = Arc::clone(&self.config);
@@ -54,7 +54,6 @@ impl DaemonServer {
         loop {
             match listener.accept().await {
                 Ok((mut stream, _)) => {
-                    let start_time = start_time;
                     let config = Arc::clone(&config);
 
                     tokio::spawn(async move {
@@ -82,7 +81,7 @@ impl DaemonServer {
             .await
             .map_err(|e| LogHavenError::Daemon(format!("Failed to bind TCP: {}", e)))?;
 
-        println!("Daemon running and listening on {}", addr);
+        println!("Daemon listening on {}", addr);
 
         let start_time = self.start_time;
         let config = Arc::clone(&self.config);
@@ -90,7 +89,6 @@ impl DaemonServer {
         loop {
             match listener.accept().await {
                 Ok((mut stream, _)) => {
-                    let start_time = start_time;
                     let config = Arc::clone(&config);
 
                     tokio::spawn(async move {

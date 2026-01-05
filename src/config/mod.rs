@@ -78,7 +78,7 @@ pub struct MinioStorageConfig {
     pub secret_key: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChainsConfig {
     #[serde(default)]
     pub enabled: Vec<String>,
@@ -150,17 +150,6 @@ impl Default for LocalStorageConfig {
         Self {
             path: defaults::local_storage_path(),
             max_size_gb: defaults::max_size_gb(),
-        }
-    }
-}
-
-impl Default for ChainsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: vec![],
-            ethereum: None,
-            solana: None,
-            stellar: None,
         }
     }
 }

@@ -60,10 +60,10 @@ pub fn validate(config: &Config) -> Result<()> {
 fn validate_local_storage(config: &Config) -> Result<()> {
     let path = &config.storage.local.path;
 
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)?;
     }
 
     Ok(())

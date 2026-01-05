@@ -32,7 +32,7 @@ impl DaemonProcess {
         // Check if process is actually running
         #[cfg(unix)]
         {
-            use nix::sys::signal::{Signal, kill};
+            use nix::sys::signal::kill;
             use nix::unistd::Pid;
 
             match kill(Pid::from_raw(pid as i32), None) {
@@ -50,7 +50,7 @@ impl DaemonProcess {
 
             // Check if process exists using tasklist
             let output = Command::new("tasklist")
-                .args(&["/FI", &format!("PID eq {}", pid), "/NH"])
+                .args(["/FI", &format!("PID eq {}", pid), "/NH"])
                 .output();
 
             match output {
@@ -87,7 +87,7 @@ impl DaemonProcess {
                 use std::process::Command;
 
                 Command::new("taskkill")
-                    .args(&["/PID", &pid.to_string(), "/F"])
+                    .args(["/PID", &pid.to_string(), "/F"])
                     .output()
                     .map_err(|e| LogHavenError::Daemon(format!("Failed to kill process: {}", e)))?;
             }
