@@ -39,6 +39,21 @@ pub enum Commands {
         #[arg(long, value_name = "TYPE")]
         storage: Option<String>,
 
+        #[arg(long, value_name = "PATH")]
+        storage_path: Option<String>,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+
+    #[command(about = "Get or set configuration values")]
+    Config {
+        #[arg(value_name = "KEY")]
+        key: String,
+
+        #[arg(value_name = "VALUE")]
+        value: Option<String>,
+
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
     },
@@ -73,8 +88,14 @@ pub fn execute(cli: Cli) -> crate::error::Result<()> {
         Some(Commands::Init {
             force,
             storage,
+            storage_path,
             profile,
-        }) => commands::init(force, storage, profile.as_deref()),
+        }) => commands::init(force, storage, storage_path, profile.as_deref()),
+        Some(Commands::Config {
+            key,
+            value,
+            profile,
+        }) => commands::config(key, value, profile.as_deref()),
         Some(Commands::Run {
             foreground,
             profile,

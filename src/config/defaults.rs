@@ -42,3 +42,19 @@ pub fn local_storage_path() -> PathBuf {
 pub fn max_size_gb() -> u64 {
     10
 }
+
+pub fn rotate_size_mb() -> u64 {
+    128
+}
+
+pub fn rotate_records() -> u64 {
+    500_000
+}
+
+pub fn flush_interval_secs() -> u64 {
+    30
+}
+
+pub fn retention_days() -> u32 {
+    30
+}

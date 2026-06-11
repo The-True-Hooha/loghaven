@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::watch;
 
 #[cfg(windows)]
 use tokio::net::TcpListener;
@@ -17,6 +18,8 @@ pub struct DaemonServer {
     tcp_port: u16,
     start_time: u64,
     config: Arc<Config>,
+    shutdown_tx: watch::Sender<bool>,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl DaemonServer {
@@ -25,12 +28,19 @@ impl DaemonServer {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Ok(Self {
             socket_path: config.daemon.socket_path.clone(),
             tcp_port: config.daemon.tcp_port,
             start_time,
             config: Arc::new(config.clone()),
+            shutdown_tx,
+            shutdown_rx,
         })
+    }
+
+    pub fn trigger_shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
     }
 
     #[cfg(unix)]
@@ -50,28 +60,47 @@ impl DaemonServer {
 
         let start_time = self.start_time;
         let config = Arc::clone(&self.config);
+        let shutdown_tx = self.shutdown_tx.clone();
+        let mut shutdown_rx = self.shutdown_rx.clone();
 
         loop {
-            match listener.accept().await {
-                Ok((mut stream, _)) => {
-                    let config = Arc::clone(&config);
+            tokio::select! {
+                accept = listener.accept() => {
+                    match accept {
+                        Ok((mut stream, _)) => {
+                            let config = Arc::clone(&config);
+                            let shutdown_tx = shutdown_tx.clone();
 
-                    tokio::spawn(async move {
-                        let mut buf = vec![0u8; 1024];
-
-                        match stream.read(&mut buf).await {
-                            Ok(n) => {
-                                let request = String::from_utf8_lossy(&buf[..n]);
-                                let response = Self::handle_request(&request, start_time, &config);
-                                let _ = stream.write_all(response.as_bytes()).await;
-                            }
-                            Err(e) => eprintln!("Read error: {}", e),
+                            tokio::spawn(async move {
+                                let mut buf = vec![0u8; 1024];
+                                match stream.read(&mut buf).await {
+                                    Ok(n) => {
+                                        let request = String::from_utf8_lossy(&buf[..n]);
+                                        let (response, should_stop) =
+                                            Self::handle_request(&request, start_time, &config);
+                                        let _ = stream.write_all(response.as_bytes()).await;
+                                        if should_stop {
+                                            let _ = shutdown_tx.send(true);
+                                        }
+                                    }
+                                    Err(e) => eprintln!("Read error: {}", e),
+                                }
+                            });
                         }
-                    });
+                        Err(e) => eprintln!("Accept error: {}", e),
+                    }
                 }
-                Err(e) => eprintln!("Accept error: {}", e),
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        println!("Daemon shutting down");
+                        let _ = std::fs::remove_file(&self.socket_path);
+                        break;
+                    }
+                }
             }
         }
+
+        Ok(())
     }
 
     #[cfg(windows)]
@@ -85,31 +114,51 @@ impl DaemonServer {
 
         let start_time = self.start_time;
         let config = Arc::clone(&self.config);
+        let shutdown_tx = self.shutdown_tx.clone();
+        let mut shutdown_rx = self.shutdown_rx.clone();
 
         loop {
-            match listener.accept().await {
-                Ok((mut stream, _)) => {
-                    let config = Arc::clone(&config);
+            tokio::select! {
+                accept = listener.accept() => {
+                    match accept {
+                        Ok((mut stream, _)) => {
+                            let config = Arc::clone(&config);
+                            let shutdown_tx = shutdown_tx.clone();
 
-                    tokio::spawn(async move {
-                        let mut buf = vec![0u8; 1024];
-
-                        match stream.read(&mut buf).await {
-                            Ok(n) => {
-                                let request = String::from_utf8_lossy(&buf[..n]);
-                                let response = Self::handle_request(&request, start_time, &config);
-                                let _ = stream.write_all(response.as_bytes()).await;
-                            }
-                            Err(e) => eprintln!("Read error: {}", e),
+                            tokio::spawn(async move {
+                                let mut buf = vec![0u8; 1024];
+                                match stream.read(&mut buf).await {
+                                    Ok(n) => {
+                                        let request = String::from_utf8_lossy(&buf[..n]);
+                                        let (response, should_stop) =
+                                            Self::handle_request(&request, start_time, &config);
+                                        let _ = stream.write_all(response.as_bytes()).await;
+                                        if should_stop {
+                                            let _ = shutdown_tx.send(true);
+                                        }
+                                    }
+                                    Err(e) => eprintln!("Read error: {}", e),
+                                }
+                            });
                         }
-                    });
+                        Err(e) => eprintln!("Accept error: {}", e),
+                    }
                 }
-                Err(e) => eprintln!("Accept error: {}", e),
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        println!("Daemon shutting down");
+                        break;
+                    }
+                }
             }
         }
+
+        Ok(())
     }
 
-    fn handle_request(request: &str, start_time: u64, config: &Config) -> String {
+    fn handle_request(request: &str, start_time: u64, config: &Config) -> (String, bool) {
+        let mut should_stop = false;
+
         let response = match serde_json::from_str::<Request>(request.trim()) {
             Ok(Request::Status) => {
                 let now = SystemTime::now()
@@ -128,6 +177,7 @@ impl DaemonServer {
                 }))
             }
             Ok(Request::Stop) => {
+                should_stop = true;
                 Response::success(ResponseData::Message("Shutting down".to_string()))
             }
             Ok(Request::Reload) => {
@@ -136,6 +186,9 @@ impl DaemonServer {
             Err(_) => Response::error("Invalid request".to_string()),
         };
 
-        serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string())
+        (
+            serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
+            should_stop,
+        )
     }
 }

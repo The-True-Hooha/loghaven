@@ -1,4 +1,5 @@
 use colored::Colorize;
+use std::path::PathBuf;
 
 use super::style;
 use crate::config::{self, Config};
@@ -6,7 +7,12 @@ use crate::error::Result;
 
 use crate::daemon::{Daemon, DaemonProcess};
 
-pub fn init(force: bool, storage: Option<String>, profile: Option<&str>) -> Result<()> {
+pub fn init(
+    force: bool,
+    storage: Option<String>,
+    storage_path: Option<String>,
+    profile: Option<&str>,
+) -> Result<()> {
     style::print_banner();
 
     let config_path = config::get_config_path(profile);
@@ -27,6 +33,11 @@ pub fn init(force: bool, storage: Option<String>, profile: Option<&str>) -> Resu
     if let Some(backend) = storage {
         cfg.storage.backend = backend.clone();
         style::info(&format!("Storage backend: {}", backend));
+    }
+
+    if let Some(path) = storage_path {
+        cfg.storage.local.path = PathBuf::from(&path);
+        style::info(&format!("Storage path: {}", path));
     }
 
     if let Some(p) = profile {
@@ -119,6 +130,88 @@ pub fn status(profile: Option<&str>) -> Result<()> {
         }
         None => {
             style::info("Daemon is not running");
+        }
+    }
+
+    Ok(())
+}
+
+pub fn config(key: String, value: Option<String>, profile: Option<&str>) -> Result<()> {
+    let config_path = config::get_config_path(profile);
+
+    if !config_path.exists() {
+        style::error("No configuration found");
+        style::info("Run 'loghaven init' first");
+        return Ok(());
+    }
+
+    let mut cfg = Config::load(&config_path)?;
+
+    match value {
+        None => {
+            let val = match key.as_str() {
+                "storage.backend" => cfg.storage.backend.clone(),
+                "storage.local.path" => cfg.storage.local.path.display().to_string(),
+                "storage.local.max_size_gb" => cfg.storage.local.max_size_gb.to_string(),
+                "storage.local.rotate_size_mb" => cfg.storage.local.rotate_size_mb.to_string(),
+                "storage.local.rotate_records" => cfg.storage.local.rotate_records.to_string(),
+                "storage.local.flush_interval_secs" => cfg.storage.local.flush_interval_secs.to_string(),
+                "storage.local.retention_days" => cfg.storage.local.retention_days.to_string(),
+                "agent.log_level" => cfg.agent.log_level.clone(),
+                "agent.name" => cfg.agent.name.clone(),
+                "daemon.tcp_port" => cfg.daemon.tcp_port.to_string(),
+                "daemon.socket_path" => cfg.daemon.socket_path.display().to_string(),
+                _ => {
+                    style::error(&format!("Unknown key: {}", key));
+                    return Ok(());
+                }
+            };
+            println!("{} = {}", key, val);
+        }
+        Some(val) => {
+            match key.as_str() {
+                "storage.backend" => cfg.storage.backend = val.clone(),
+                "storage.local.path" => cfg.storage.local.path = PathBuf::from(&val),
+                "storage.local.max_size_gb" => {
+                    cfg.storage.local.max_size_gb = val.parse().map_err(|_| {
+                        crate::error::LogHavenError::Config("max_size_gb must be a number".into())
+                    })?;
+                }
+                "storage.local.rotate_size_mb" => {
+                    cfg.storage.local.rotate_size_mb = val.parse().map_err(|_| {
+                        crate::error::LogHavenError::Config("rotate_size_mb must be a number".into())
+                    })?;
+                }
+                "storage.local.rotate_records" => {
+                    cfg.storage.local.rotate_records = val.parse().map_err(|_| {
+                        crate::error::LogHavenError::Config("rotate_records must be a number".into())
+                    })?;
+                }
+                "storage.local.flush_interval_secs" => {
+                    cfg.storage.local.flush_interval_secs = val.parse().map_err(|_| {
+                        crate::error::LogHavenError::Config("flush_interval_secs must be a number".into())
+                    })?;
+                }
+                "storage.local.retention_days" => {
+                    cfg.storage.local.retention_days = val.parse().map_err(|_| {
+                        crate::error::LogHavenError::Config("retention_days must be a number".into())
+                    })?;
+                }
+                "agent.log_level" => cfg.agent.log_level = val.clone(),
+                "agent.name" => cfg.agent.name = val.clone(),
+                "daemon.tcp_port" => {
+                    cfg.daemon.tcp_port = val.parse().map_err(|_| {
+                        crate::error::LogHavenError::Config("tcp_port must be a number".into())
+                    })?;
+                }
+                "daemon.socket_path" => cfg.daemon.socket_path = PathBuf::from(&val),
+                _ => {
+                    style::error(&format!("Unknown key: {}", key));
+                    return Ok(());
+                }
+            }
+            cfg.save(&config_path)?;
+            style::success(&format!("Set {} = {}", key, val));
         }
     }
 

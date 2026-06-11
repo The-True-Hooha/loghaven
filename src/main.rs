@@ -6,6 +6,7 @@ mod config;
 mod daemon;
 mod error;
 mod ipc;
+mod storage;
 
 fn main() {
     let cli = Cli::parse();

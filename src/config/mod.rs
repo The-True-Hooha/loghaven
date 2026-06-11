@@ -54,6 +54,18 @@ pub struct LocalStorageConfig {
 
     #[serde(default = "defaults::max_size_gb")]
     pub max_size_gb: u64,
+
+    #[serde(default = "defaults::rotate_size_mb")]
+    pub rotate_size_mb: u64,
+
+    #[serde(default = "defaults::rotate_records")]
+    pub rotate_records: u64,
+
+    #[serde(default = "defaults::flush_interval_secs")]
+    pub flush_interval_secs: u64,
+
+    #[serde(default = "defaults::retention_days")]
+    pub retention_days: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +162,10 @@ impl Default for LocalStorageConfig {
         Self {
             path: defaults::local_storage_path(),
             max_size_gb: defaults::max_size_gb(),
+            rotate_size_mb: defaults::rotate_size_mb(),
+            rotate_records: defaults::rotate_records(),
+            flush_interval_secs: defaults::flush_interval_secs(),
+            retention_days: defaults::retention_days(),
         }
     }
 }
