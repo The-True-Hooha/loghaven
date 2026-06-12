@@ -21,12 +21,46 @@ pub struct AgentConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default = "defaults::auth_keys_dir")]
+    pub keys_dir: PathBuf,
+
+    #[serde(default = "defaults::session_ttl_secs")]
+    pub session_ttl_secs: u64,
+
+    #[serde(default = "defaults::query_port")]
+    pub query_port: u16,
+
+    /// When false, ingest accepts unauthenticated datagrams (dev mode)
+    #[serde(default = "bool_true")]
+    pub require_auth: bool,
+}
+
+fn bool_true() -> bool {
+    true
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            keys_dir: defaults::auth_keys_dir(),
+            session_ttl_secs: defaults::session_ttl_secs(),
+            query_port: defaults::query_port(),
+            require_auth: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
     #[serde(default = "defaults::socket_path")]
     pub socket_path: PathBuf,
 
     #[serde(default = "defaults::tcp_port")]
     pub tcp_port: u16,
+
+    #[serde(default = "defaults::ingest_port")]
+    pub ingest_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +88,18 @@ pub struct LocalStorageConfig {
 
     #[serde(default = "defaults::max_size_gb")]
     pub max_size_gb: u64,
+
+    #[serde(default = "defaults::rotate_size_mb")]
+    pub rotate_size_mb: u64,
+
+    #[serde(default = "defaults::rotate_records")]
+    pub rotate_records: u64,
+
+    #[serde(default = "defaults::flush_interval_secs")]
+    pub flush_interval_secs: u64,
+
+    #[serde(default = "defaults::retention_days")]
+    pub retention_days: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +107,8 @@ pub struct S3StorageConfig {
     pub bucket: String,
     pub region: String,
     pub prefix: Option<String>,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +116,8 @@ pub struct R2StorageConfig {
     pub account_id: String,
     pub bucket: String,
     pub prefix: Option<String>,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +177,7 @@ impl Default for DaemonConfig {
         Self {
             socket_path: defaults::socket_path(),
             tcp_port: defaults::tcp_port(),
+            ingest_port: defaults::ingest_port(),
         }
     }
 }
@@ -150,6 +201,10 @@ impl Default for LocalStorageConfig {
         Self {
             path: defaults::local_storage_path(),
             max_size_gb: defaults::max_size_gb(),
+            rotate_size_mb: defaults::rotate_size_mb(),
+            rotate_records: defaults::rotate_records(),
+            flush_interval_secs: defaults::flush_interval_secs(),
+            retention_days: defaults::retention_days(),
         }
     }
 }
@@ -214,6 +269,9 @@ pub struct Config {
 
     #[serde(default)]
     pub chains: ChainsConfig,
+
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 pub fn get_config_path(profile: Option<&str>) -> PathBuf {
@@ -234,5 +292,6 @@ pub fn default_config() -> Config {
         daemon: DaemonConfig::default(),
         storage: StorageConfig::default(),
         chains: ChainsConfig::default(),
+        auth: AuthConfig::default(),
     }
 }

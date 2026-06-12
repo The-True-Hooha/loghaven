@@ -5,6 +5,8 @@ pub enum Request {
     Status,
     Stop,
     Reload,
+    /// Exchange an RS256-signed JWT for a session token (token_id + hmac_secret).
+    Auth { jwt: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,6 +21,14 @@ pub struct Response {
 pub enum ResponseData {
     Status(StatusData),
     Message(String),
+    Session(SessionData),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionData {
+    pub token_id: String,
+    pub secret_hex: String, // hex-encoded 32-byte HMAC key
+    pub expires_in_secs: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -39,6 +39,21 @@ pub enum Commands {
         #[arg(long, value_name = "TYPE")]
         storage: Option<String>,
 
+        #[arg(long, value_name = "PATH")]
+        storage_path: Option<String>,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+
+    #[command(about = "Get or set configuration values")]
+    Config {
+        #[arg(value_name = "KEY")]
+        key: String,
+
+        #[arg(value_name = "VALUE")]
+        value: Option<String>,
+
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
     },
@@ -66,6 +81,60 @@ pub enum Commands {
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
     },
+
+    #[command(about = "Query logs from the daemon")]
+    Logs {
+        #[arg(value_name = "APP")]
+        app: String,
+
+        #[arg(long)]
+        level: Option<String>,
+
+        #[arg(long)]
+        source: Option<String>,
+
+        #[arg(long, value_name = "MS")]
+        from: Option<i64>,
+
+        #[arg(long, value_name = "MS")]
+        to: Option<i64>,
+
+        #[arg(long)]
+        text: Option<String>,
+
+        #[arg(long, default_value = "100")]
+        limit: usize,
+
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+
+    #[command(about = "Manage authentication keys and session tokens")]
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuthCommands {
+    #[command(about = "Generate RSA-2048 keypair for signing and verifying JWTs")]
+    Keygen {
+        #[arg(long)]
+        force: bool,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+
+    #[command(about = "Print the public key path (share with SDK callers)")]
+    PublicKey {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
 }
 
 pub fn execute(cli: Cli) -> crate::error::Result<()> {
@@ -73,14 +142,37 @@ pub fn execute(cli: Cli) -> crate::error::Result<()> {
         Some(Commands::Init {
             force,
             storage,
+            storage_path,
             profile,
-        }) => commands::init(force, storage, profile.as_deref()),
+        }) => commands::init(force, storage, storage_path, profile.as_deref()),
+        Some(Commands::Config {
+            key,
+            value,
+            profile,
+        }) => commands::config(key, value, profile.as_deref()),
         Some(Commands::Run {
             foreground,
             profile,
         }) => commands::run(foreground, profile.as_deref()),
         Some(Commands::Status { profile }) => commands::status(profile.as_deref()),
         Some(Commands::Stop { force, profile }) => commands::stop(force, profile.as_deref()),
+        Some(Commands::Logs {
+            app,
+            level,
+            source,
+            from,
+            to,
+            text,
+            limit,
+            token,
+            profile,
+        }) => commands::logs(app, level, source, from, to, text, limit, token, profile.as_deref()),
+        Some(Commands::Auth { command }) => match command {
+            AuthCommands::Keygen { force, profile } => {
+                commands::auth_keygen(force, profile.as_deref())
+            }
+            AuthCommands::PublicKey { profile } => commands::auth_public_key(profile.as_deref()),
+        },
         None => {
             style::print_banner();
             println!("Run 'loghaven --help' for usage information\n");
