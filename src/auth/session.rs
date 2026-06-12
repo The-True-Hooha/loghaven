@@ -73,7 +73,7 @@ impl SessionStore {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        if now > session.expires_at {
+        if now >= session.expires_at {
             return Err(LogHavenError::Config("session expired".into()));
         }
 

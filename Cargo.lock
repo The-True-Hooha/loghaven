@@ -2178,6 +2178,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tantivy",
+ "tempfile",
  "thiserror 2.0.17",
  "tokio",
  "toml",

@@ -1,15 +1,15 @@
 use crate::storage::record::LogRecord;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::{NoContext, Timestamp, Uuid};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct IngestPayload {
     pub app: String,
     pub records: Vec<IngestRecord>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct IngestRecord {
     pub level: String,
     pub source: String,

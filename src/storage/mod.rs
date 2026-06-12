@@ -5,6 +5,8 @@ pub mod pruner;
 pub mod query;
 pub mod record;
 mod writer;
+#[cfg(test)]
+mod tests;
 
 pub use local::LocalBackend;
 pub use record::LogRecord;

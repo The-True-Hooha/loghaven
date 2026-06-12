@@ -35,6 +35,9 @@ axum = "0.8"
 tower = "0.5"
 reqwest = { version = "0.12", features = ["json"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 strip = true
 lto = true
