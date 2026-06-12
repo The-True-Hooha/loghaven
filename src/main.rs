@@ -1,10 +1,14 @@
+#![allow(dead_code)]
+mod auth;
 mod cli;
+mod query;
 use clap::Parser;
 use cli::Cli;
 
 mod config;
 mod daemon;
 mod error;
+mod ingest;
 mod ipc;
 mod storage;
 

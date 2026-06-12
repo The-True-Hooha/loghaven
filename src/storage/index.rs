@@ -53,7 +53,10 @@ impl AppIndex {
         let f_app = builder.add_text_field("app", string_stored());
         let f_timestamp_ms = builder.add_i64_field(
             "timestamp_ms",
-            NumericOptions::default().set_stored().set_fast().set_indexed(),
+            NumericOptions::default()
+                .set_stored()
+                .set_fast()
+                .set_indexed(),
         );
         let f_level = builder.add_text_field("level", string_stored());
         let f_source = builder.add_text_field("source", string_stored());
@@ -67,8 +70,7 @@ impl AppIndex {
 
         let schema = builder.build();
 
-        let dir = MmapDirectory::open(path)
-            .map_err(|e| LogHavenError::Storage(e.to_string()))?;
+        let dir = MmapDirectory::open(path).map_err(|e| LogHavenError::Storage(e.to_string()))?;
         let index = Index::open_or_create(dir, schema)
             .map_err(|e| LogHavenError::Storage(e.to_string()))?;
 
@@ -79,8 +81,18 @@ impl AppIndex {
         Ok(Self {
             index,
             writer: Mutex::new(writer),
-            f_id, f_app, f_timestamp_ms, f_level, f_source, f_message,
-            f_trace_id, f_span_id, f_chain, f_tx_hash, f_tags, f_metadata,
+            f_id,
+            f_app,
+            f_timestamp_ms,
+            f_level,
+            f_source,
+            f_message,
+            f_trace_id,
+            f_span_id,
+            f_chain,
+            f_tx_hash,
+            f_tags,
+            f_metadata,
         })
     }
 
@@ -92,12 +104,24 @@ impl AppIndex {
         doc.add_text(self.f_level, &record.level);
         doc.add_text(self.f_source, &record.source);
         doc.add_text(self.f_message, &record.message);
-        if let Some(v) = &record.trace_id { doc.add_text(self.f_trace_id, v); }
-        if let Some(v) = &record.span_id  { doc.add_text(self.f_span_id, v); }
-        if let Some(v) = &record.chain    { doc.add_text(self.f_chain, v); }
-        if let Some(v) = &record.tx_hash  { doc.add_text(self.f_tx_hash, v); }
-        if let Some(v) = &record.tags     { doc.add_text(self.f_tags, v); }
-        if let Some(v) = &record.metadata { doc.add_text(self.f_metadata, v); }
+        if let Some(v) = &record.trace_id {
+            doc.add_text(self.f_trace_id, v);
+        }
+        if let Some(v) = &record.span_id {
+            doc.add_text(self.f_span_id, v);
+        }
+        if let Some(v) = &record.chain {
+            doc.add_text(self.f_chain, v);
+        }
+        if let Some(v) = &record.tx_hash {
+            doc.add_text(self.f_tx_hash, v);
+        }
+        if let Some(v) = &record.tags {
+            doc.add_text(self.f_tags, v);
+        }
+        if let Some(v) = &record.metadata {
+            doc.add_text(self.f_metadata, v);
+        }
 
         self.writer
             .lock()
@@ -118,7 +142,8 @@ impl AppIndex {
     }
 
     pub fn search(&self, query_str: &str, limit: usize) -> Result<Vec<LogRecord>> {
-        let reader = self.index
+        let reader = self
+            .index
             .reader()
             .map_err(|e| LogHavenError::Storage(e.to_string()))?;
         let searcher = reader.searcher();
@@ -158,18 +183,18 @@ impl AppIndex {
             };
 
             records.push(LogRecord {
-                id:           get_str(self.f_id),
-                app:          get_str(self.f_app),
+                id: get_str(self.f_id),
+                app: get_str(self.f_app),
                 timestamp_ms: get_i64(self.f_timestamp_ms),
-                level:        get_str(self.f_level),
-                source:       get_str(self.f_source),
-                message:      get_str(self.f_message),
-                trace_id:     get_opt(self.f_trace_id),
-                span_id:      get_opt(self.f_span_id),
-                chain:        get_opt(self.f_chain),
-                tx_hash:      get_opt(self.f_tx_hash),
-                tags:         get_opt(self.f_tags),
-                metadata:     get_opt(self.f_metadata),
+                level: get_str(self.f_level),
+                source: get_str(self.f_source),
+                message: get_str(self.f_message),
+                trace_id: get_opt(self.f_trace_id),
+                span_id: get_opt(self.f_span_id),
+                chain: get_opt(self.f_chain),
+                tx_hash: get_opt(self.f_tx_hash),
+                tags: get_opt(self.f_tags),
+                metadata: get_opt(self.f_metadata),
             });
         }
 

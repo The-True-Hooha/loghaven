@@ -105,7 +105,8 @@ fn read_parquet_file(path: &PathBuf) -> Result<Vec<LogRecord>> {
     let file = File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| LogHavenError::Storage(e.to_string()))?;
-    let reader = builder.build()
+    let reader = builder
+        .build()
         .map_err(|e| LogHavenError::Storage(e.to_string()))?;
 
     let mut records = Vec::new();
@@ -116,18 +117,90 @@ fn read_parquet_file(path: &PathBuf) -> Result<Vec<LogRecord>> {
 
         let col_idx = |name: &str| schema.index_of(name).ok();
 
-        let ids       = col_idx("id").and_then(|i| batch.column(i).as_any().downcast_ref::<StringArray>().map(|a| a as *const _));
-        let apps      = col_idx("app").and_then(|i| batch.column(i).as_any().downcast_ref::<StringArray>().map(|a| a as *const _));
-        let tss       = col_idx("timestamp_ms").and_then(|i| batch.column(i).as_any().downcast_ref::<Int64Array>().map(|a| a as *const _));
-        let levels    = col_idx("level").and_then(|i| batch.column(i).as_any().downcast_ref::<StringArray>().map(|a| a as *const _));
-        let sources   = col_idx("source").and_then(|i| batch.column(i).as_any().downcast_ref::<StringArray>().map(|a| a as *const _));
-        let messages  = col_idx("message").and_then(|i| batch.column(i).as_any().downcast_ref::<LargeStringArray>().map(|a| a as *const _));
-        let trace_ids = col_idx("trace_id").and_then(|i| batch.column(i).as_any().downcast_ref::<StringArray>().map(|a| a as *const _));
-        let span_ids  = col_idx("span_id").and_then(|i| batch.column(i).as_any().downcast_ref::<StringArray>().map(|a| a as *const _));
-        let chains    = col_idx("chain").and_then(|i| batch.column(i).as_any().downcast_ref::<StringArray>().map(|a| a as *const _));
-        let tx_hashes = col_idx("tx_hash").and_then(|i| batch.column(i).as_any().downcast_ref::<StringArray>().map(|a| a as *const _));
-        let tags_col  = col_idx("tags").and_then(|i| batch.column(i).as_any().downcast_ref::<StringArray>().map(|a| a as *const _));
-        let meta_col  = col_idx("metadata").and_then(|i| batch.column(i).as_any().downcast_ref::<StringArray>().map(|a| a as *const _));
+        let ids = col_idx("id").and_then(|i| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|a| a as *const _)
+        });
+        let apps = col_idx("app").and_then(|i| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|a| a as *const _)
+        });
+        let tss = col_idx("timestamp_ms").and_then(|i| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .map(|a| a as *const _)
+        });
+        let levels = col_idx("level").and_then(|i| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|a| a as *const _)
+        });
+        let sources = col_idx("source").and_then(|i| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|a| a as *const _)
+        });
+        let messages = col_idx("message").and_then(|i| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .map(|a| a as *const _)
+        });
+        let trace_ids = col_idx("trace_id").and_then(|i| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|a| a as *const _)
+        });
+        let span_ids = col_idx("span_id").and_then(|i| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|a| a as *const _)
+        });
+        let chains = col_idx("chain").and_then(|i| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|a| a as *const _)
+        });
+        let tx_hashes = col_idx("tx_hash").and_then(|i| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|a| a as *const _)
+        });
+        let tags_col = col_idx("tags").and_then(|i| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|a| a as *const _)
+        });
+        let meta_col = col_idx("metadata").and_then(|i| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|a| a as *const _)
+        });
 
         for row in 0..batch.num_rows() {
             let get_str = |ptr: Option<*const StringArray>| -> String {
@@ -156,18 +229,18 @@ fn read_parquet_file(path: &PathBuf) -> Result<Vec<LogRecord>> {
             };
 
             records.push(LogRecord {
-                id:           get_str(ids),
-                app:          get_str(apps),
+                id: get_str(ids),
+                app: get_str(apps),
                 timestamp_ms: get_i64(tss),
-                level:        get_str(levels),
-                source:       get_str(sources),
-                message:      get_large(messages),
-                trace_id:     get_opt(trace_ids),
-                span_id:      get_opt(span_ids),
-                chain:        get_opt(chains),
-                tx_hash:      get_opt(tx_hashes),
-                tags:         get_opt(tags_col),
-                metadata:     get_opt(meta_col),
+                level: get_str(levels),
+                source: get_str(sources),
+                message: get_large(messages),
+                trace_id: get_opt(trace_ids),
+                span_id: get_opt(span_ids),
+                chain: get_opt(chains),
+                tx_hash: get_opt(tx_hashes),
+                tags: get_opt(tags_col),
+                metadata: get_opt(meta_col),
             });
         }
     }
@@ -217,7 +290,11 @@ fn ms_to_date_str(ms: i64) -> String {
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp as i64 + 3 } else { mp as i64 - 9 };
+    let m = if mp < 10 {
+        mp as i64 + 3
+    } else {
+        mp as i64 - 9
+    };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{:04}-{:02}-{:02}", y, m, d)
 }

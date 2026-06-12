@@ -2,6 +2,7 @@ use colored::Colorize;
 use std::path::PathBuf;
 
 use super::style;
+use crate::auth::keys::generate_keypair;
 use crate::config::{self, Config};
 use crate::error::Result;
 
@@ -155,7 +156,9 @@ pub fn config(key: String, value: Option<String>, profile: Option<&str>) -> Resu
                 "storage.local.max_size_gb" => cfg.storage.local.max_size_gb.to_string(),
                 "storage.local.rotate_size_mb" => cfg.storage.local.rotate_size_mb.to_string(),
                 "storage.local.rotate_records" => cfg.storage.local.rotate_records.to_string(),
-                "storage.local.flush_interval_secs" => cfg.storage.local.flush_interval_secs.to_string(),
+                "storage.local.flush_interval_secs" => {
+                    cfg.storage.local.flush_interval_secs.to_string()
+                }
                 "storage.local.retention_days" => cfg.storage.local.retention_days.to_string(),
                 "agent.log_level" => cfg.agent.log_level.clone(),
                 "agent.name" => cfg.agent.name.clone(),
@@ -179,22 +182,30 @@ pub fn config(key: String, value: Option<String>, profile: Option<&str>) -> Resu
                 }
                 "storage.local.rotate_size_mb" => {
                     cfg.storage.local.rotate_size_mb = val.parse().map_err(|_| {
-                        crate::error::LogHavenError::Config("rotate_size_mb must be a number".into())
+                        crate::error::LogHavenError::Config(
+                            "rotate_size_mb must be a number".into(),
+                        )
                     })?;
                 }
                 "storage.local.rotate_records" => {
                     cfg.storage.local.rotate_records = val.parse().map_err(|_| {
-                        crate::error::LogHavenError::Config("rotate_records must be a number".into())
+                        crate::error::LogHavenError::Config(
+                            "rotate_records must be a number".into(),
+                        )
                     })?;
                 }
                 "storage.local.flush_interval_secs" => {
                     cfg.storage.local.flush_interval_secs = val.parse().map_err(|_| {
-                        crate::error::LogHavenError::Config("flush_interval_secs must be a number".into())
+                        crate::error::LogHavenError::Config(
+                            "flush_interval_secs must be a number".into(),
+                        )
                     })?;
                 }
                 "storage.local.retention_days" => {
                     cfg.storage.local.retention_days = val.parse().map_err(|_| {
-                        crate::error::LogHavenError::Config("retention_days must be a number".into())
+                        crate::error::LogHavenError::Config(
+                            "retention_days must be a number".into(),
+                        )
                     })?;
                 }
                 "agent.log_level" => cfg.agent.log_level = val.clone(),
@@ -254,5 +265,136 @@ pub fn stop(force: bool, profile: Option<&str>) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+pub fn logs(
+    app: String,
+    level: Option<String>,
+    source: Option<String>,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
+    text: Option<String>,
+    limit: usize,
+    token: Option<String>,
+    profile: Option<&str>,
+) -> Result<()> {
+    let config_path = config::get_config_path(profile);
+    let cfg = Config::load(&config_path)?;
+
+    let mut url = format!(
+        "http://127.0.0.1:{}/logs?app={}&limit={}",
+        cfg.auth.query_port, app, limit
+    );
+    if let Some(l) = &level {
+        url.push_str(&format!("&level={}", l));
+    }
+    if let Some(s) = &source {
+        url.push_str(&format!("&source={}", s));
+    }
+    if let Some(f) = from_ms {
+        url.push_str(&format!("&from_ms={}", f));
+    }
+    if let Some(t) = to_ms {
+        url.push_str(&format!("&to_ms={}", t));
+    }
+    if let Some(t) = &text {
+        url.push_str(&format!("&text={}", t));
+    }
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let records = rt.block_on(async {
+        let client = reqwest::Client::new();
+        let mut req = client.get(&url);
+        if let Some(tok) = &token {
+            req = req.header("authorization", format!("Bearer {}", tok));
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| crate::error::LogHavenError::Daemon(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(crate::error::LogHavenError::Daemon(format!(
+                "query failed {}: {}",
+                status, body
+            )));
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| crate::error::LogHavenError::Daemon(e.to_string()))?;
+        Ok(body)
+    })?;
+
+    let count = records["count"].as_u64().unwrap_or(0);
+    style::success(&format!("{} records", count));
+
+    if let Some(arr) = records["records"].as_array() {
+        for r in arr {
+            let ts = r["timestamp_ms"].as_i64().unwrap_or(0);
+            let level = r["level"].as_str().unwrap_or("?");
+            let source = r["source"].as_str().unwrap_or("?");
+            let msg = r["message"].as_str().unwrap_or("");
+            println!("[{}] {} {} | {}", ts, level, source, msg);
+        }
+    }
+
+    Ok(())
+}
+
+pub fn auth_keygen(force: bool, profile: Option<&str>) -> Result<()> {
+    let config_path = config::get_config_path(profile);
+
+    let keys_dir = if config_path.exists() {
+        Config::load(&config_path)?.auth.keys_dir
+    } else {
+        crate::config::AuthConfig::default().keys_dir
+    };
+
+    let private_path = keys_dir.join("private.pem");
+    let public_path = keys_dir.join("public.pem");
+
+    if private_path.exists() && !force {
+        style::error("Keypair already exists");
+        style::info(&format!("Keys dir: {}", keys_dir.display()));
+        style::info("Use --force to regenerate (this will invalidate existing sessions)");
+        return Ok(());
+    }
+
+    style::step("Generating RSA-2048 keypair...");
+    generate_keypair(&private_path, &public_path)?;
+
+    style::success(&format!("Private key: {}", private_path.display()));
+    style::success(&format!("Public key:  {}", public_path.display()));
+    println!(
+        "\n{}",
+        "Share the public key with SDK callers. Keep the private key secret.".bright_black()
+    );
+
+    Ok(())
+}
+
+pub fn auth_public_key(profile: Option<&str>) -> Result<()> {
+    let config_path = config::get_config_path(profile);
+
+    let keys_dir = if config_path.exists() {
+        Config::load(&config_path)?.auth.keys_dir
+    } else {
+        crate::config::AuthConfig::default().keys_dir
+    };
+
+    let public_path = keys_dir.join("public.pem");
+
+    if !public_path.exists() {
+        style::error("No public key found");
+        style::info("Run 'loghaven auth keygen' first");
+        return Ok(());
+    }
+
+    println!("{}", public_path.display());
     Ok(())
 }

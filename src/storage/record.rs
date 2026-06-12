@@ -71,18 +71,66 @@ pub fn records_to_batch(records: &[LogRecord]) -> crate::error::Result<RecordBat
     let batch = RecordBatch::try_new(
         schema,
         vec![
-            Arc::new(StringArray::from(records.iter().map(|r| r.id.as_str()).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(StringArray::from(records.iter().map(|r| r.app.as_str()).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(Int64Array::from(records.iter().map(|r| r.timestamp_ms).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(StringArray::from(records.iter().map(|r| r.level.as_str()).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(StringArray::from(records.iter().map(|r| r.source.as_str()).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(LargeStringArray::from(records.iter().map(|r| r.message.as_str()).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(StringArray::from(records.iter().map(|r| r.trace_id.as_deref()).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(StringArray::from(records.iter().map(|r| r.span_id.as_deref()).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(StringArray::from(records.iter().map(|r| r.chain.as_deref()).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(StringArray::from(records.iter().map(|r| r.tx_hash.as_deref()).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(StringArray::from(records.iter().map(|r| r.tags.as_deref()).collect::<Vec<_>>())) as ArrayRef,
-            Arc::new(StringArray::from(records.iter().map(|r| r.metadata.as_deref()).collect::<Vec<_>>())) as ArrayRef,
+            Arc::new(StringArray::from(
+                records.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(StringArray::from(
+                records.iter().map(|r| r.app.as_str()).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(Int64Array::from(
+                records.iter().map(|r| r.timestamp_ms).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(StringArray::from(
+                records.iter().map(|r| r.level.as_str()).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(StringArray::from(
+                records
+                    .iter()
+                    .map(|r| r.source.as_str())
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(LargeStringArray::from(
+                records
+                    .iter()
+                    .map(|r| r.message.as_str())
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(StringArray::from(
+                records
+                    .iter()
+                    .map(|r| r.trace_id.as_deref())
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(StringArray::from(
+                records
+                    .iter()
+                    .map(|r| r.span_id.as_deref())
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(StringArray::from(
+                records
+                    .iter()
+                    .map(|r| r.chain.as_deref())
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(StringArray::from(
+                records
+                    .iter()
+                    .map(|r| r.tx_hash.as_deref())
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(StringArray::from(
+                records
+                    .iter()
+                    .map(|r| r.tags.as_deref())
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(StringArray::from(
+                records
+                    .iter()
+                    .map(|r| r.metadata.as_deref())
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
         ],
     )
     .map_err(|e| crate::error::LogHavenError::Storage(e.to_string()))?;

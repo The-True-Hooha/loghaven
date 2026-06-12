@@ -136,7 +136,11 @@ fn epoch_days_to_date(days: i64) -> String {
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp as i64 + 3 } else { mp as i64 - 9 };
+    let m = if mp < 10 {
+        mp as i64 + 3
+    } else {
+        mp as i64 - 9
+    };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{:04}-{:02}-{:02}", y, m, d)
 }

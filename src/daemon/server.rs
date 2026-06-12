@@ -1,4 +1,6 @@
-use super::super::ipc::protocol::{Request, Response, ResponseData, StatusData};
+use super::super::ipc::protocol::{Request, Response, ResponseData, SessionData, StatusData};
+use crate::auth::session::SessionStore;
+use crate::auth::token::verify_jwt;
 use crate::config::Config;
 use crate::error::{LogHavenError, Result};
 use std::path::PathBuf;
@@ -18,22 +20,36 @@ pub struct DaemonServer {
     tcp_port: u16,
     start_time: u64,
     config: Arc<Config>,
+    sessions: Arc<SessionStore>,
+    public_key_pem: Option<String>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
 impl DaemonServer {
-    pub async fn new(config: &Config) -> Result<Self> {
+    pub async fn new(config: &Config, sessions: Arc<SessionStore>) -> Result<Self> {
         let start_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let public_key_pem = {
+            let pub_path = config.auth.keys_dir.join("public.pem");
+            if pub_path.exists() {
+                std::fs::read_to_string(&pub_path).ok()
+            } else {
+                None
+            }
+        };
+
         Ok(Self {
             socket_path: config.daemon.socket_path.clone(),
             tcp_port: config.daemon.tcp_port,
             start_time,
             config: Arc::new(config.clone()),
+            sessions,
+            public_key_pem,
             shutdown_tx,
             shutdown_rx,
         })
@@ -60,6 +76,8 @@ impl DaemonServer {
 
         let start_time = self.start_time;
         let config = Arc::clone(&self.config);
+        let sessions = Arc::clone(&self.sessions);
+        let public_key_pem = self.public_key_pem.clone();
         let shutdown_tx = self.shutdown_tx.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
 
@@ -69,15 +87,18 @@ impl DaemonServer {
                     match accept {
                         Ok((mut stream, _)) => {
                             let config = Arc::clone(&config);
+                            let sessions = Arc::clone(&sessions);
+                            let public_key_pem = public_key_pem.clone();
                             let shutdown_tx = shutdown_tx.clone();
 
                             tokio::spawn(async move {
-                                let mut buf = vec![0u8; 1024];
+                                let mut buf = vec![0u8; 4096];
                                 match stream.read(&mut buf).await {
                                     Ok(n) => {
                                         let request = String::from_utf8_lossy(&buf[..n]);
-                                        let (response, should_stop) =
-                                            Self::handle_request(&request, start_time, &config);
+                                        let (response, should_stop) = Self::handle_request(
+                                            &request, start_time, &config, &sessions, public_key_pem.as_deref(),
+                                        );
                                         let _ = stream.write_all(response.as_bytes()).await;
                                         if should_stop {
                                             let _ = shutdown_tx.send(true);
@@ -114,6 +135,8 @@ impl DaemonServer {
 
         let start_time = self.start_time;
         let config = Arc::clone(&self.config);
+        let sessions = Arc::clone(&self.sessions);
+        let public_key_pem = self.public_key_pem.clone();
         let shutdown_tx = self.shutdown_tx.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
 
@@ -123,15 +146,18 @@ impl DaemonServer {
                     match accept {
                         Ok((mut stream, _)) => {
                             let config = Arc::clone(&config);
+                            let sessions = Arc::clone(&sessions);
+                            let public_key_pem = public_key_pem.clone();
                             let shutdown_tx = shutdown_tx.clone();
 
                             tokio::spawn(async move {
-                                let mut buf = vec![0u8; 1024];
+                                let mut buf = vec![0u8; 4096];
                                 match stream.read(&mut buf).await {
                                     Ok(n) => {
                                         let request = String::from_utf8_lossy(&buf[..n]);
-                                        let (response, should_stop) =
-                                            Self::handle_request(&request, start_time, &config);
+                                        let (response, should_stop) = Self::handle_request(
+                                            &request, start_time, &config, &sessions, public_key_pem.as_deref(),
+                                        );
                                         let _ = stream.write_all(response.as_bytes()).await;
                                         if should_stop {
                                             let _ = shutdown_tx.send(true);
@@ -156,7 +182,13 @@ impl DaemonServer {
         Ok(())
     }
 
-    fn handle_request(request: &str, start_time: u64, config: &Config) -> (String, bool) {
+    fn handle_request(
+        request: &str,
+        start_time: u64,
+        config: &Config,
+        sessions: &SessionStore,
+        public_key_pem: Option<&str>,
+    ) -> (String, bool) {
         let mut should_stop = false;
 
         let response = match serde_json::from_str::<Request>(request.trim()) {
@@ -165,11 +197,9 @@ impl DaemonServer {
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_secs();
-                let uptime = now - start_time;
-
                 Response::success(ResponseData::Status(StatusData {
                     pid: std::process::id(),
-                    uptime,
+                    uptime: now - start_time,
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     status: "running".to_string(),
                     storage_backend: config.storage.backend.clone(),
@@ -183,6 +213,12 @@ impl DaemonServer {
             Ok(Request::Reload) => {
                 Response::success(ResponseData::Message("Configuration reloaded".to_string()))
             }
+            Ok(Request::Auth { jwt }) => {
+                match Self::handle_auth(&jwt, sessions, public_key_pem, config.auth.session_ttl_secs) {
+                    Ok(data) => Response::success(ResponseData::Session(data)),
+                    Err(e) => Response::error(e.to_string()),
+                }
+            }
             Err(_) => Response::error("Invalid request".to_string()),
         };
 
@@ -190,5 +226,36 @@ impl DaemonServer {
             serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
             should_stop,
         )
+    }
+
+    fn handle_auth(
+        jwt: &str,
+        sessions: &SessionStore,
+        public_key_pem: Option<&str>,
+        ttl_secs: u64,
+    ) -> Result<SessionData> {
+        let pem = public_key_pem.ok_or_else(|| {
+            LogHavenError::Config("no public key configured; run `loghaven auth keygen`".into())
+        })?;
+
+        let claims = verify_jwt(jwt, pem)?;
+
+        // Override TTL with config value; claims.exp already validated by verify_jwt
+        let _ = ttl_secs;
+        let remaining = claims.exp.saturating_sub(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+
+        let (token_id, secret) = sessions.issue(&claims.sub)?;
+        let secret_hex = hex::encode(&secret);
+
+        Ok(SessionData {
+            token_id,
+            secret_hex,
+            expires_in_secs: remaining,
+        })
     }
 }

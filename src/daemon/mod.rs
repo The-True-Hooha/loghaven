@@ -2,13 +2,16 @@ mod process;
 mod server;
 mod state;
 
+use crate::auth::session::SessionStore;
 use crate::config::Config;
 use crate::error::{LogHavenError, Result};
-use crate::storage::LocalBackend;
-use std::sync::Arc;
+use crate::ingest::IngestServer;
+use crate::query::QueryServer;
+use crate::storage::StorageRouter;
 pub use process::DaemonProcess;
 pub use server::DaemonServer;
 pub use state::DaemonState;
+use std::sync::Arc;
 
 pub struct Daemon {
     config: Config,
@@ -26,18 +29,24 @@ impl Daemon {
     pub async fn run(&mut self) -> Result<()> {
         self.state.mark_started();
 
-        let app = if self.config.agent.name == "loghaven-agent" {
-            return Err(LogHavenError::Config(
-                "agent.name must be set to your app name before running".into(),
-            ));
-        } else {
-            self.config.agent.name.clone()
-        };
-
         let storage = Arc::new(
-            LocalBackend::new(app, &self.config.storage.local)
-                .map_err(|e| LogHavenError::Storage(e.to_string()))?,
+            StorageRouter::new(&self.config).map_err(|e| LogHavenError::Storage(e.to_string()))?,
         );
+
+        let sessions = Arc::new(SessionStore::new(self.config.auth.session_ttl_secs));
+
+        // Purge expired sessions hourly
+        {
+            let sessions_clone = Arc::clone(&sessions);
+            tokio::spawn(async move {
+                let mut ticker =
+                    tokio::time::interval(tokio::time::Duration::from_secs(3600));
+                loop {
+                    ticker.tick().await;
+                    sessions_clone.purge_expired();
+                }
+            });
+        }
 
         tokio::spawn(crate::storage::pruner::run_pruner(
             self.config.storage.local.path.clone(),
@@ -45,7 +54,26 @@ impl Daemon {
             self.config.storage.local.max_size_gb,
         ));
 
-        let server = DaemonServer::new(&self.config).await?;
+        let ingest = IngestServer::new(
+            self.config.daemon.ingest_port,
+            Arc::clone(&storage),
+            Arc::clone(&sessions),
+            self.config.auth.require_auth,
+        );
+        tokio::spawn(async move {
+            if let Err(e) = ingest.listen().await {
+                eprintln!("Ingest server error: {}", e);
+            }
+        });
+
+        let query_server = QueryServer::new(&self.config, Arc::clone(&sessions));
+        tokio::spawn(async move {
+            if let Err(e) = query_server.listen().await {
+                eprintln!("Query server error: {}", e);
+            }
+        });
+
+        let ipc = DaemonServer::new(&self.config, Arc::clone(&sessions)).await?;
 
         #[cfg(unix)]
         {
@@ -57,14 +85,14 @@ impl Daemon {
                 .map_err(|e| LogHavenError::Daemon(format!("signal error: {}", e)))?;
 
             tokio::select! {
-                result = server.listen() => result?,
+                result = ipc.listen() => result?,
                 _ = sigterm.recv() => {
                     println!("Received SIGTERM, shutting down");
-                    server.trigger_shutdown();
+                    ipc.trigger_shutdown();
                 }
                 _ = sigint.recv() => {
                     println!("Received SIGINT, shutting down");
-                    server.trigger_shutdown();
+                    ipc.trigger_shutdown();
                 }
             }
         }
@@ -72,15 +100,15 @@ impl Daemon {
         #[cfg(windows)]
         {
             tokio::select! {
-                result = server.listen() => result?,
+                result = ipc.listen() => result?,
                 _ = tokio::signal::ctrl_c() => {
                     println!("Received Ctrl+C, shutting down");
-                    server.trigger_shutdown();
+                    ipc.trigger_shutdown();
                 }
             }
         }
 
-        storage.shutdown().await?;
+        storage.shutdown_all().await?;
         Ok(())
     }
 }

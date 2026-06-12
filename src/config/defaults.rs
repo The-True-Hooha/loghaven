@@ -28,8 +28,12 @@ pub fn tcp_port() -> u16 {
     9090
 }
 
+pub fn ingest_port() -> u16 {
+    9100
+}
+
 pub fn storage_backend() -> String {
-    "local".to_string()
+    "auto".to_string()
 }
 
 pub fn local_storage_path() -> PathBuf {
@@ -57,4 +61,19 @@ pub fn flush_interval_secs() -> u64 {
 
 pub fn retention_days() -> u32 {
     30
+}
+
+pub fn auth_keys_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("loghaven")
+        .join("keys")
+}
+
+pub fn session_ttl_secs() -> u64 {
+    3600 // 1 hour
+}
+
+pub fn query_port() -> u16 {
+    9200
 }

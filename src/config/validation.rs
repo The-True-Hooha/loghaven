@@ -3,13 +3,14 @@ use crate::error::{LogHavenError, Result};
 
 pub fn validate(config: &Config) -> Result<()> {
     match config.storage.backend.as_str() {
+        "auto" => {}
         "local" => validate_local_storage(config)?,
         "s3" => validate_s3_storage(config)?,
         "r2" => validate_r2_storage(config)?,
         "minio" => validate_minio_storage(config)?,
         backend => {
             return Err(LogHavenError::Config(format!(
-                "Unknown storage backend: {}",
+                "Unknown storage backend: {}. Valid: auto, local, s3, r2, minio",
                 backend
             )));
         }
@@ -70,35 +71,39 @@ fn validate_local_storage(config: &Config) -> Result<()> {
 }
 
 fn validate_s3_storage(config: &Config) -> Result<()> {
-    if config.storage.s3.is_none() {
+    let s3 = config.storage.s3.as_ref().ok_or_else(|| {
+        LogHavenError::Config("S3 backend selected but no [storage.s3] config provided".into())
+    })?;
+    if s3.access_key.is_none() || s3.secret_key.is_none() {
         return Err(LogHavenError::Config(
-            "S3 backend selected but no S3 config provided".to_string(),
+            "S3 config requires access_key and secret_key".into(),
         ));
     }
-
-    // TODO: Check AWS credentials
     Ok(())
 }
 
 fn validate_r2_storage(config: &Config) -> Result<()> {
-    if config.storage.r2.is_none() {
+    let r2 = config.storage.r2.as_ref().ok_or_else(|| {
+        LogHavenError::Config("R2 backend selected but no [storage.r2] config provided".into())
+    })?;
+    if r2.access_key.is_none() || r2.secret_key.is_none() {
         return Err(LogHavenError::Config(
-            "R2 backend selected but no R2 config provided".to_string(),
+            "R2 config requires access_key and secret_key".into(),
         ));
     }
-
-    // TODO: Check R2 credentials
-
     Ok(())
 }
 
 fn validate_minio_storage(config: &Config) -> Result<()> {
-    if config.storage.minio.is_none() {
+    let minio = config.storage.minio.as_ref().ok_or_else(|| {
+        LogHavenError::Config(
+            "MinIO backend selected but no [storage.minio] config provided".into(),
+        )
+    })?;
+    if minio.access_key.is_empty() || minio.secret_key.is_empty() {
         return Err(LogHavenError::Config(
-            "MinIO backend selected but no MinIO config provided".to_string(),
+            "MinIO config requires access_key and secret_key".into(),
         ));
     }
-    // TODO: Check MINIO credentials
-
     Ok(())
 }

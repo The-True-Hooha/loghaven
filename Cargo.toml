@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 arrow = "59"
 aws-sdk-s3 = "1"
+rmp-serde = "1"
 clap = { version = "4", features = ["derive"] }
 colored = "3"
 dirs = "6"
@@ -22,6 +23,17 @@ thiserror = "2"
 tokio = { version = "1", features = ["full", "net", "rt-multi-thread", "sync"] }
 toml = "0.9"
 uuid = { version = "1", features = ["v7"] }
+jsonwebtoken = "9"
+ring = "0.17"
+base64 = "0.22"
+rand = "0.8"
+hmac = "0.12"
+sha2 = "0.10"
+rsa = { version = "0.9", features = ["pem"] }
+hex = "0.4"
+axum = "0.8"
+tower = "0.5"
+reqwest = { version = "0.12", features = ["json"] }
 
 [profile.release]
 strip = true

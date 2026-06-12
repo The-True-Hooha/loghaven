@@ -1,5 +1,5 @@
 use crate::error::{LogHavenError, Result};
-use crate::storage::record::{log_schema, records_to_batch, LogRecord};
+use crate::storage::record::{LogRecord, log_schema, records_to_batch};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
@@ -23,7 +23,11 @@ impl ChunkWriter {
             .build();
         let writer = ArrowWriter::try_new(file, log_schema(), Some(props))
             .map_err(|e| LogHavenError::Storage(e.to_string()))?;
-        Ok(Self { writer, path, record_count: 0 })
+        Ok(Self {
+            writer,
+            path,
+            record_count: 0,
+        })
     }
 
     pub fn write_batch(&mut self, records: &[LogRecord]) -> Result<()> {
