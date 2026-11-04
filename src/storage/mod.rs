@@ -6,7 +6,7 @@ pub mod local;
 pub mod pruner;
 pub mod query;
 pub mod record;
-mod writer;
+pub(crate) mod writer;
 
 pub use app_name::validate_app_name;
 pub use local::LocalBackend;

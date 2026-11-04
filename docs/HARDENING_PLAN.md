@@ -52,12 +52,13 @@ Tests: flush produces readable file, crash leftovers (`.tmp`) ignored and cleane
 ## Step 4 - Query correctness
 Problems: `text` filter ignored (index never passed), results oldest-first, one unreadable file fails the whole query, from-only/to-only filters do not prune, `unsafe` raw pointers in the reader.
 Change:
-- Query state holds the `StorageRouter`; text queries use the tantivy index when present, otherwise a case-insensitive substring scan of message/tags/metadata.
+- Parquet chunks are the only read path; the tantivy index is write-side only because it can be incomplete. `text` is a case-insensitive substring match on message/tags/metadata (no query syntax).
 - Newest-first ordering with early stop.
 - Unreadable chunks are skipped with a warning.
 - Date pruning for open-ended ranges.
 - Safe column access in the Parquet reader.
-- `limit` capped server-side.
+- `limit` must be 1..=10000 (400 otherwise); `from_ms <= to_ms` (400 otherwise); ties on timestamp break on id; results are capped at ~64 MiB; at most 4 concurrent scans (503 beyond) with a 30 s timeout (504).
+- Known limit, not fixed here: every chunk is fully decoded per query (no column projection or row-group pruning), and early stop assumes chunks sit in the directory of their records' date.
 Tests: text match and miss, ordering, limit, filters, corrupt file skipped, open-ended ranges, empty app dir.
 
 ## Step 5 - Cloud sync safety

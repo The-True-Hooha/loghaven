@@ -13,7 +13,11 @@ pub struct QueryState {
     pub public_key_pem: Option<String>,
     pub data_path: std::path::PathBuf,
     pub require_auth: bool,
+    /// Bounds concurrent scans; each holds a blocking thread and reads whole chunks.
+    pub query_slots: Arc<tokio::sync::Semaphore>,
 }
+
+pub const MAX_CONCURRENT_QUERIES: usize = 4;
 
 pub struct QueryServer {
     port: u16,
@@ -34,6 +38,7 @@ impl QueryServer {
                 public_key_pem,
                 data_path: config.storage.local.path.clone(),
                 require_auth: config.auth.require_auth,
+                query_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_QUERIES)),
             },
         }
     }

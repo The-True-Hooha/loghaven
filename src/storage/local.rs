@@ -321,7 +321,7 @@ mod tests {
             limit: usize::MAX,
             ..Default::default()
         };
-        query(tmp, &f, None).unwrap()
+        query(tmp, &f).unwrap()
     }
 
     fn chunks_in(dir: &Path) -> usize {
