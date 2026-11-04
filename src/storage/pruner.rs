@@ -1,4 +1,4 @@
-use crate::storage::local::current_date;
+use crate::storage::date::today as current_date;
 use std::path::PathBuf;
 use tokio::time::{Duration, interval};
 
@@ -95,48 +95,9 @@ fn walkdir(path: &PathBuf) -> u64 {
 }
 
 fn date_subtract_days(date: &str, days: u32) -> String {
-    let parts: Vec<&str> = date.split('-').collect();
-    if parts.len() != 3 {
-        return date.to_string();
+    use crate::storage::date::{epoch_days_to_date, parse_date};
+    match parse_date(date) {
+        Some(d) => epoch_days_to_date(d.saturating_sub(days as i64)),
+        None => date.to_string(),
     }
-    let (y, m, d) = match (
-        parts[0].parse::<i64>(),
-        parts[1].parse::<i64>(),
-        parts[2].parse::<i64>(),
-    ) {
-        (Ok(y), Ok(m), Ok(d)) => (y, m, d),
-        _ => return date.to_string(),
-    };
-
-    let epoch_days = date_to_epoch_days(y, m, d);
-    let new_days = epoch_days.saturating_sub(days as i64);
-    epoch_days_to_date(new_days)
-}
-
-fn date_to_epoch_days(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let m = if m <= 2 { m + 9 } else { m - 3 };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * m + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
-
-fn epoch_days_to_date(days: i64) -> String {
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 {
-        mp as i64 + 3
-    } else {
-        mp as i64 - 9
-    };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{:04}-{:02}-{:02}", y, m, d)
 }

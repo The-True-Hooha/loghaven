@@ -64,8 +64,8 @@ fn scan_parquet(data_path: &std::path::Path, filter: &QueryFilter) -> Result<Vec
     date_dirs.sort();
 
     if let (Some(from), Some(to)) = (filter.from_ms, filter.to_ms) {
-        let from_date = ms_to_date_str(from);
-        let to_date = ms_to_date_str(to);
+        let from_date = crate::storage::date::date_from_ms(from);
+        let to_date = crate::storage::date::date_from_ms(to);
         date_dirs.retain(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
@@ -279,25 +279,6 @@ fn apply_filters(records: Vec<LogRecord>, filter: &QueryFilter) -> Vec<LogRecord
         .filter(|r| matches_filter(r, filter))
         .take(filter.limit)
         .collect()
-}
-
-fn ms_to_date_str(ms: i64) -> String {
-    let secs = (ms / 1000) as u64;
-    let z = (secs / 86400) as i64 + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 {
-        mp as i64 + 3
-    } else {
-        mp as i64 - 9
-    };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
 #[cfg(test)]

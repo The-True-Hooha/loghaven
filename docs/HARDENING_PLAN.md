@@ -42,7 +42,11 @@ Change:
 - Every flush writes a complete chunk to `NNNNN.parquet.tmp` and atomically renames it. Chunks never exceed `rotate_records` records. Data is visible within `flush_interval_secs` and a crash loses at most the unflushed buffer.
 - Writer errors are logged and the buffer is retained for retry up to a cap; the task never panics.
 - Index commit on every flush; index errors are logged.
-- `rotate_size_mb` is documented as advisory (flush threshold) or removed.
+- Chunk files are named `<unix_ms>-<seq>.parquet`, never reused, so an uploaded-and-deleted chunk can never be overwritten or collide with a cloud object key.
+- The Parquet chunks are the source of truth. An index failure is logged with counts and does not fail the flush; text search must not depend on the index being complete (step 4).
+- After a failed flush, per-record flush triggers pause until the next tick or explicit flush. Pending records are capped by count (100k) and bytes (256 MiB), dropping the oldest.
+- `rotate_size_mb` is ignored (documented in the config struct).
+- Known limit, not fixed here: chunk I/O runs on the async worker thread (a dedicated writer thread or `spawn_blocking` is future work). Only one writer per app is possible because tantivy's index lock is taken first.
 Tests: flush produces readable file, crash leftovers (`.tmp`) ignored and cleaned, rotate by record count, date rollover, unwritable directory does not kill the task, shutdown flushes.
 
 ## Step 4 - Query correctness

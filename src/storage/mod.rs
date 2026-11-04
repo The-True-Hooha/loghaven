@@ -1,5 +1,6 @@
 mod app_name;
 pub mod cloud;
+pub mod date;
 mod index;
 pub mod local;
 pub mod pruner;
@@ -62,7 +63,9 @@ impl StorageRouter {
         let backends: Vec<Arc<LocalBackend>> =
             { self.backends.lock().unwrap().values().cloned().collect() };
         for b in backends {
-            let _ = b.shutdown().await;
+            if let Err(e) = b.shutdown().await {
+                eprintln!("Storage shutdown error ({}): {}", b.app, e);
+            }
         }
         Ok(())
     }

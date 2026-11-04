@@ -89,9 +89,12 @@ pub struct LocalStorageConfig {
     #[serde(default = "defaults::max_size_gb")]
     pub max_size_gb: u64,
 
+    /// Ignored: chunks are written whole on every flush. Kept so existing
+    /// config files still parse.
     #[serde(default = "defaults::rotate_size_mb")]
     pub rotate_size_mb: u64,
 
+    /// Maximum records per chunk file.
     #[serde(default = "defaults::rotate_records")]
     pub rotate_records: u64,
 
