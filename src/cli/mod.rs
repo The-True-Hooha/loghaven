@@ -105,8 +105,48 @@ pub enum Commands {
         #[arg(long, default_value = "100")]
         limit: usize,
 
-        #[arg(long, value_name = "TOKEN")]
+        #[arg(
+            long,
+            value_name = "TOKEN",
+            help = "Session token_id; minted automatically from the local private key when omitted"
+        )]
         token: Option<String>,
+
+        #[arg(
+            long,
+            help = "Keep running and print new records as they become queryable"
+        )]
+        follow: bool,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+
+    #[command(about = "Send log records to the local daemon (for testing and scripts)")]
+    Send {
+        #[arg(value_name = "APP")]
+        app: String,
+
+        #[arg(value_name = "MESSAGE")]
+        message: String,
+
+        #[arg(long, default_value = "info")]
+        level: String,
+
+        #[arg(long, default_value = "cli")]
+        source: String,
+
+        #[arg(long, default_value = "1", help = "Send the message this many times")]
+        count: usize,
+
+        #[arg(long)]
+        chain: Option<String>,
+
+        #[arg(long)]
+        tx_hash: Option<String>,
+
+        #[arg(long)]
+        trace_id: Option<String>,
 
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
@@ -125,6 +165,18 @@ pub enum AuthCommands {
     Keygen {
         #[arg(long)]
         force: bool,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+
+    #[command(about = "Print a signed JWT for an app (exchange it at POST /auth for a session)")]
+    Token {
+        #[arg(value_name = "APP")]
+        app: String,
+
+        #[arg(long, default_value = "3600", value_name = "SECS")]
+        ttl_secs: u64,
 
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
@@ -165,6 +217,7 @@ pub fn execute(cli: Cli) -> crate::error::Result<()> {
             text,
             limit,
             token,
+            follow,
             profile,
         }) => commands::logs(
             app,
@@ -175,12 +228,39 @@ pub fn execute(cli: Cli) -> crate::error::Result<()> {
             text,
             limit,
             token,
+            follow,
+            profile.as_deref(),
+        ),
+        Some(Commands::Send {
+            app,
+            message,
+            level,
+            source,
+            count,
+            chain,
+            tx_hash,
+            trace_id,
+            profile,
+        }) => commands::send(
+            app,
+            message,
+            level,
+            source,
+            count,
+            chain,
+            tx_hash,
+            trace_id,
             profile.as_deref(),
         ),
         Some(Commands::Auth { command }) => match command {
             AuthCommands::Keygen { force, profile } => {
                 commands::auth_keygen(force, profile.as_deref())
             }
+            AuthCommands::Token {
+                app,
+                ttl_secs,
+                profile,
+            } => commands::auth_token(app, ttl_secs, profile.as_deref()),
             AuthCommands::PublicKey { profile } => commands::auth_public_key(profile.as_deref()),
         },
         None => {

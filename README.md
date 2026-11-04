@@ -31,8 +31,8 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 | Phase | Theme | Status |
 |-------|-------|--------|
 | 0 - Foundation | Daemon, local storage, ingest, query API, auth, cloud sync | **Done** (v0.1, current) |
-| 1 - Usable end to end | Token issuing CLI, client SDK, `logs --follow` | **Next** |
-| 2 - Chain awareness | Ethereum adapter, tx-hash correlation | Planned |
+| 1 - Usable end to end | Token CLI, client SDK, `send`, `logs --follow`, wire spec | **Done** (see [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md)) |
+| 2 - Chain awareness | Ethereum adapter, tx-hash correlation | **Next** |
 | 3 - Interfaces | TUI, dashboard | Planned |
 | 4 - Production hardening | Client-side encryption, multi-backend, persistent sessions, license | Planned |
 
@@ -46,12 +46,13 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 - Pruner by retention days and size; never removes data that is not yet uploaded
 - Input validation (app names), CI-clean build, 100+ tests including an end-to-end ingest-to-query test
 
-### Phase 1 - Usable end to end (next)
+### Phase 1 - Usable end to end (done)
 
-- `loghaven auth token <app>`: mint the RS256 JWT that `/auth` exchanges for a session (the signing code exists but has no command yet, so authenticated ingest cannot be driven from the CLI today)
-- A small client SDK (Rust first) that signs datagrams and manages counters and sessions
-- `loghaven logs --follow` for live tailing
-- Document the wire format (datagram header, payload JSON/msgpack)
+- `loghaven auth token <app>` prints a signed JWT
+- `loghaven send <app> <message>` sends records (signs and sequences datagrams for you)
+- `loghaven logs <app> --follow` tails live; `logs` mints its own session when no `--token` is given
+- Rust client in `src/client` (session exchange, datagram signing, batching); wire format in [docs/WIRE_FORMAT.md](docs/WIRE_FORMAT.md)
+- A language SDK crate and other-language SDKs are still to come
 
 ### Phase 2 - Chain awareness
 

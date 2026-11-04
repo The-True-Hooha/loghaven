@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 mod auth;
 mod cli;
+mod client;
 mod query;
 use clap::Parser;
 use cli::Cli;
