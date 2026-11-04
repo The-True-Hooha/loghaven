@@ -16,6 +16,12 @@ pub fn init(
 ) -> Result<()> {
     style::print_banner();
 
+    if profile.is_none()
+        && let Some(p) = config::migrate_legacy_config()?
+    {
+        style::info(&format!("Renamed legacy config_toml to {}", p.display()));
+    }
+
     let config_path = config::get_config_path(profile);
 
     if config_path.exists() && !force {
@@ -79,25 +85,33 @@ pub fn run(foreground: bool, profile: Option<&str>) -> Result<()> {
     style::step("Validating configuration...");
     cfg.validate()?;
 
+    // claimed before forking so a lost race is reported to the user, not the detached child
+    DaemonProcess::write_pid(profile)?;
+
     if !foreground {
         style::step("starting daemon in background...");
-        DaemonProcess::daemonize()?;
+        if let Err(e) = DaemonProcess::daemonize() {
+            DaemonProcess::remove_pid_if_owner(profile);
+            return Err(e);
+        }
+        DaemonProcess::update_pid(profile)?;
     } else {
         style::info("Running in foreground mode");
     }
-
-    DaemonProcess::write_pid(profile)?;
 
     style::success(&format!("Using storage backend: {}", cfg.storage.backend));
     style::success(&format!("Log level: {}", cfg.agent.log_level));
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
+    let result = rt.block_on(async {
         let mut daemon = Daemon::new(cfg);
         daemon.run().await
-    })?;
+    });
+    // signal and IPC shutdowns end here too, so the PID file never outlives the daemon
+    DaemonProcess::remove_pid_if_owner(profile);
+    result?;
 
-    style::success("Agent started");
+    style::success("Agent stopped");
 
     Ok(())
 }
@@ -268,6 +282,98 @@ pub fn stop(force: bool, profile: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn logs_params(
+    app: &str,
+    limit: usize,
+    level: &Option<String>,
+    source: &Option<String>,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
+    text: &Option<String>,
+) -> Vec<(&'static str, String)> {
+    let mut p = vec![("app", app.to_string()), ("limit", limit.to_string())];
+    if let Some(v) = level {
+        p.push(("level", v.clone()));
+    }
+    if let Some(v) = source {
+        p.push(("source", v.clone()));
+    }
+    if let Some(v) = from_ms {
+        p.push(("from_ms", v.to_string()));
+    }
+    if let Some(v) = to_ms {
+        p.push(("to_ms", v.to_string()));
+    }
+    if let Some(v) = text {
+        p.push(("text", v.clone()));
+    }
+    p
+}
+
+const SESSION_TTL_SECS: u64 = 3600;
+const MAX_TOKEN_TTL_SECS: u64 = 30 * 24 * 3600;
+const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
+fn print_record(r: &crate::storage::record::LogRecord) {
+    let mut line = format!(
+        "[{}] {} {} | {}",
+        r.timestamp_ms,
+        r.level,
+        r.source,
+        r.message.replace('\n', "\\n")
+    );
+    if let Some(c) = &r.chain {
+        line.push_str(&format!(" chain={c}"));
+    }
+    if let Some(t) = &r.tx_hash {
+        line.push_str(&format!(" tx={t}"));
+    }
+    if let Some(t) = &r.trace_id {
+        line.push_str(&format!(" trace={t}"));
+    }
+    println!("{line}");
+}
+
+/// A query token that is minted on demand and renewed at 80% of the lifetime
+/// the daemon actually granted.
+struct QueryToken<'a> {
+    cfg: &'a Config,
+    app: &'a str,
+    explicit: Option<String>,
+    current: Option<(String, std::time::Instant)>,
+}
+
+impl QueryToken<'_> {
+    async fn get(&mut self) -> Result<Option<String>> {
+        if let Some(t) = &self.explicit {
+            return Ok(Some(t.clone()));
+        }
+        if !self.cfg.auth.require_auth {
+            return Ok(None);
+        }
+        let stale = self
+            .current
+            .as_ref()
+            .is_none_or(|(_, renew_at)| std::time::Instant::now() >= *renew_at);
+        if stale {
+            let s = crate::client::open_session(self.cfg, self.app, SESSION_TTL_SECS).await?;
+            let renew_in = std::time::Duration::from_secs(s.expires_in_secs * 4 / 5);
+            self.current = Some((s.token_id, std::time::Instant::now() + renew_in));
+        }
+        Ok(self.current.as_ref().map(|(t, _)| t.clone()))
+    }
+}
+
+const FOLLOW_PAGE: usize = 1000;
+const FOLLOW_MAX_PAGE: usize = 10_000;
+
+#[allow(clippy::too_many_arguments)]
 pub fn logs(
     app: String,
     level: Option<String>,
@@ -277,72 +383,178 @@ pub fn logs(
     text: Option<String>,
     limit: usize,
     token: Option<String>,
+    follow: bool,
     profile: Option<&str>,
 ) -> Result<()> {
+    if follow && to_ms.is_some() {
+        return Err(crate::error::LogHavenError::Config(
+            "--to cannot be combined with --follow".into(),
+        ));
+    }
     let config_path = config::get_config_path(profile);
     let cfg = Config::load(&config_path)?;
-
-    let mut url = format!(
-        "http://127.0.0.1:{}/logs?app={}&limit={}",
-        cfg.auth.query_port, app, limit
-    );
-    if let Some(l) = &level {
-        url.push_str(&format!("&level={}", l));
-    }
-    if let Some(s) = &source {
-        url.push_str(&format!("&source={}", s));
-    }
-    if let Some(f) = from_ms {
-        url.push_str(&format!("&from_ms={}", f));
-    }
-    if let Some(t) = to_ms {
-        url.push_str(&format!("&to_ms={}", t));
-    }
-    if let Some(t) = &text {
-        url.push_str(&format!("&text={}", t));
-    }
+    let port = cfg.auth.query_port;
+    let mut tok = QueryToken {
+        cfg: &cfg,
+        app: &app,
+        explicit: token,
+        current: None,
+    };
 
     let rt = tokio::runtime::Runtime::new()?;
-    let records = rt.block_on(async {
-        let client = reqwest::Client::new();
-        let mut req = client.get(&url);
-        if let Some(tok) = &token {
-            req = req.header("authorization", format!("Bearer {}", tok));
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| crate::error::LogHavenError::Daemon(e.to_string()))?;
+    rt.block_on(async {
+        let params = logs_params(&app, limit, &level, &source, from_ms, to_ms, &text);
+        let t = tok.get().await?;
+        let first = crate::client::fetch_logs(port, &params, t.as_deref()).await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(crate::error::LogHavenError::Daemon(format!(
-                "query failed {}: {}",
-                status, body
-            )));
+        if !follow {
+            style::success(&format!("{} records", first.len()));
+            for r in first.iter().rev() {
+                print_record(r);
+            }
+            return Ok(());
         }
 
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| crate::error::LogHavenError::Daemon(e.to_string()))?;
-        Ok(body)
+        // records are timestamped on arrival but only queryable after the next flush
+        let lookback_ms = (cfg.storage.local.flush_interval_secs as i64 * 2 + 5) * 1000;
+        let mut state = crate::client::follow::FollowState::new(now_ms(), lookback_ms);
+        style::info(&format!(
+            "Following '{app}' (new records can take up to {}s to appear); Ctrl+C to stop",
+            cfg.storage.local.flush_interval_secs
+        ));
+        for r in state.accept(first) {
+            print_record(&r);
+        }
+        let mut last_warning = String::new();
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => return Ok(()),
+                _ = tokio::time::sleep(FOLLOW_POLL) => {}
+            }
+            let from = state.next_from_ms().max(from_ms.unwrap_or(i64::MIN));
+            let polled = async {
+                let t = tok.get().await?;
+                let mut batch = poll_page(
+                    port,
+                    &app,
+                    &level,
+                    &source,
+                    from,
+                    &text,
+                    FOLLOW_PAGE,
+                    t.as_deref(),
+                )
+                .await?;
+                if batch.len() >= FOLLOW_PAGE {
+                    batch = poll_page(
+                        port,
+                        &app,
+                        &level,
+                        &source,
+                        from,
+                        &text,
+                        FOLLOW_MAX_PAGE,
+                        t.as_deref(),
+                    )
+                    .await?;
+                    if batch.len() >= FOLLOW_MAX_PAGE {
+                        style::warning(
+                            "More than 10000 records in the follow window; some may be skipped",
+                        );
+                    }
+                }
+                Ok::<_, crate::error::LogHavenError>(batch)
+            }
+            .await;
+            match polled {
+                Ok(batch) => {
+                    last_warning.clear();
+                    for r in state.accept(batch) {
+                        print_record(&r);
+                    }
+                }
+                // the daemon may be restarting; keep following, but say each problem once
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg != last_warning {
+                        style::warning(&msg);
+                        last_warning = msg;
+                    }
+                }
+            }
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn poll_page(
+    port: u16,
+    app: &str,
+    level: &Option<String>,
+    source: &Option<String>,
+    from: i64,
+    text: &Option<String>,
+    limit: usize,
+    token: Option<&str>,
+) -> Result<Vec<crate::storage::record::LogRecord>> {
+    let params = logs_params(app, limit, level, source, Some(from), None, text);
+    crate::client::fetch_logs(port, &params, token).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn send(
+    app: String,
+    message: String,
+    level: String,
+    source: String,
+    count: usize,
+    chain: Option<String>,
+    tx_hash: Option<String>,
+    trace_id: Option<String>,
+    profile: Option<&str>,
+) -> Result<()> {
+    if count == 0 || count > 100_000 {
+        return Err(crate::error::LogHavenError::Config(
+            "count must be between 1 and 100000".into(),
+        ));
+    }
+    let cfg = Config::load(&config::get_config_path(profile))?;
+    let record = crate::client::ClientRecord {
+        level,
+        source,
+        message,
+        chain,
+        tx_hash,
+        trace_id,
+        ..Default::default()
+    };
+    let records = vec![record; count];
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let datagrams = rt.block_on(async {
+        let mut client = crate::client::IngestClient::connect(&cfg, &app, SESSION_TTL_SECS).await?;
+        client.send(&records).await
     })?;
 
-    let count = records["count"].as_u64().unwrap_or(0);
-    style::success(&format!("{} records", count));
+    style::success(&format!(
+        "Sent {count} record(s) to '{app}' in {datagrams} datagram(s)"
+    ));
+    style::info(&format!(
+        "UDP is fire-and-forget. Records become queryable after the next flush (<= {}s): loghaven logs {app}",
+        cfg.storage.local.flush_interval_secs
+    ));
+    Ok(())
+}
 
-    if let Some(arr) = records["records"].as_array() {
-        for r in arr {
-            let ts = r["timestamp_ms"].as_i64().unwrap_or(0);
-            let level = r["level"].as_str().unwrap_or("?");
-            let source = r["source"].as_str().unwrap_or("?");
-            let msg = r["message"].as_str().unwrap_or("");
-            println!("[{}] {} {} | {}", ts, level, source, msg);
-        }
+pub fn auth_token(app: String, ttl_secs: u64, profile: Option<&str>) -> Result<()> {
+    if ttl_secs == 0 || ttl_secs > MAX_TOKEN_TTL_SECS {
+        return Err(crate::error::LogHavenError::Config(format!(
+            "ttl-secs must be between 1 and {MAX_TOKEN_TTL_SECS}"
+        )));
     }
-
+    let cfg = Config::load(&config::get_config_path(profile))?;
+    // stdout carries only the token so it can be captured: JWT=$(loghaven auth token web)
+    println!("{}", crate::client::mint_jwt(&cfg, &app, ttl_secs)?);
     Ok(())
 }
 
@@ -397,4 +609,49 @@ pub fn auth_public_key(profile: Option<&str>) -> Result<()> {
 
     println!("{}", public_path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logs_params_are_structured_not_string_spliced() {
+        let text = Some("a&app=evil #x=y".to_string());
+        let p = logs_params("web", 5, &None, &None, Some(1), None, &text);
+        assert_eq!(p[0], ("app", "web".to_string()));
+        assert_eq!(p[1], ("limit", "5".to_string()));
+        assert!(p.contains(&("from_ms", "1".to_string())));
+        assert!(p.contains(&("text", "a&app=evil #x=y".to_string())));
+        assert!(!p.iter().any(|(k, _)| *k == "to_ms" || *k == "level"));
+        let req = reqwest::Client::new()
+            .get("http://127.0.0.1:1/logs")
+            .query(&p)
+            .build()
+            .unwrap();
+        let pairs: Vec<_> = req.url().query_pairs().collect();
+        assert_eq!(pairs.iter().filter(|(k, _)| k == "app").count(), 1);
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| k == "text" && v == "a&app=evil #x=y")
+        );
+    }
+
+    #[test]
+    fn follow_with_an_upper_bound_is_rejected_before_any_io() {
+        let r = logs(
+            "web".into(),
+            None,
+            None,
+            None,
+            Some(1),
+            None,
+            10,
+            None,
+            true,
+            Some("no-such-profile"),
+        );
+        assert!(matches!(r, Err(crate::error::LogHavenError::Config(m)) if m.contains("--follow")));
+    }
 }

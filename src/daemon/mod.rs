@@ -39,8 +39,7 @@ impl Daemon {
         {
             let sessions_clone = Arc::clone(&sessions);
             tokio::spawn(async move {
-                let mut ticker =
-                    tokio::time::interval(tokio::time::Duration::from_secs(3600));
+                let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(3600));
                 loop {
                     ticker.tick().await;
                     sessions_clone.purge_expired();
@@ -52,6 +51,7 @@ impl Daemon {
             self.config.storage.local.path.clone(),
             self.config.storage.local.retention_days,
             self.config.storage.local.max_size_gb,
+            storage.has_cloud_sync(),
         ));
 
         let ingest = IngestServer::new(

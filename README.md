@@ -9,377 +9,319 @@
 ╚══════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝
 ```
 
-A local-first, composable, chain-aware observability runtime for on-chain and off-chain systems
+A local-first, composable, chain-aware observability runtime for on-chain and off-chain systems.
 
-## Overview
+> **Status: pre-1.0.** Phases 0 (foundation) and 1 (usable end to end) are done. Chain adapters, TUI and dashboard are not built yet. See the [roadmap](#roadmap).
 
-LogHaven is a **local-first, chain-agnostic observability runtime** that ingests telemetry data locally with complete storage control. Unlike traditional SaaS observability platforms that charge per ingestion and lock you into proprietary systems, LogHaven gives you full control over your data while providing powerful cross-chain correlation capabilities.
+## What it is
 
-### Key Features
+LogHaven is a daemon that runs on your machine. Your applications send it log records over a local UDP socket; it stores them as compressed Parquet files on your disk (optionally copying them to S3, R2 or MinIO) and serves them back through a local HTTP API and the `loghaven` CLI. Nothing leaves your machine unless you configure cloud sync, and there is no per-ingestion fee.
 
-- Local-First Architecture - Your data stays on your infrastructure by default
-- Chain-Agnostic - Unified observability across Ethereum, Solana, Stellar, and more
-- Bring Your Own Storage - Support for local filesystem, S3, R2, MinIO
-- Transaction-Centric - Correlate on-chain transactions with off-chain logs
-- Privacy-First - Client-side encryption, no vendor lock-in
-- Zero Ingestion Fees - No usage-based pricing traps
+Records can carry a `chain` and `tx_hash`, so on-chain activity and off-chain logs can be correlated (the correlation commands arrive in Phase 2).
 
-## Quick Start
+**Today it gives you**
 
-### Installation
+- Local-first storage in open formats (Parquet, zstd), one folder per app and day
+- Authenticated, replay-protected ingest (RS256 JWT, then a per-session HMAC key)
+- Query by app, level, source, time range and text, newest first
+- Live tail (`logs --follow`)
+- Optional upload to S3, R2 or MinIO with retry, retention and size limits
+- A Rust client and a documented wire format for other languages
 
-**Linux / macOS:**
+## Install
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/The-True-Hooha/loghaven/main/scripts/install.sh | sh
-```
+### From source (works today)
 
-**Windows (PowerShell):**
-
-```powershell
-irm https://raw.githubusercontent.com/The-True-Hooha/loghaven/main/scripts/install.ps1 | iex
-```
-
-**From Source:**
-
-```bash
-cargo install --git https://github.com/The-True-Hooha/loghaven
-```
-
-### Verify Installation
-
-```bash
-loghaven --version
-```
-
-### Initialize Configuration
-
-```bash
-loghaven init
-```
-
-This creates a default configuration file at:
-
-- **Linux/macOS:** `~/.config/loghaven/config.toml`
-- **Windows:** `%APPDATA%\loghaven\config.toml`
-
-## Architecture
-
-### Design Philosophy
-
-LogHaven follows a **separation of concerns** architecture built on these core principles:
-
-#### 1. Local-First by Default
-
-- Agent runs on your infrastructure
-- No external services required for core functionality
-- Network calls are explicit and opt-in
-
-#### 2. Daemon-Based Runtime
-
-- Long-running background process handles data ingestion
-- CLI communicates with daemon via IPC (Unix sockets/named pipes)
-- Daemon owns all stateful operations (storage, processing, indexing)
-
-#### 3. Pluggable Storage Backends
-
-- Abstract storage interface
-- Multiple simultaneous backends (write local, sync to cloud)
-- Consistent data format across all backends
-
-#### 4. Chain Adapters as Plugins
-
-- Each blockchain is an independent module
-- Normalized event format across chains
-- Adding new chains doesn't require core changes
-
-### System Components
-
-```cmd
-┌──────────────────────────────────────────────────────────┐
-│                     User Interface                        │
-│  ┌─────────┐  ┌──────────┐  ┌─────────┐  ┌──────────┐   │
-│  │   CLI   │  │    TUI   │  │Dashboard│  │   API    │   │
-│  └────┬────┘  └─────┬────┘  └────┬────┘  └─────┬────┘   │
-└───────┼────────────┼─────────────┼─────────────┼─────────┘
-        │            │             │             │
-        └────────────┴─────────────┴─────────────┘
-                            │
-                            ▼
-                ┌───────────────────────┐
-                │    IPC Layer          │
-                │  (Unix Socket / Pipe) │
-                └───────────┬───────────┘
-                            │
-                            ▼
-        ┌───────────────────────────────────────┐
-        │        Daemon Runtime (Core)          │
-        │  ┌─────────────┐  ┌────────────────┐ │
-        │  │   Ingestion │  │  Transaction   │ │
-        │  │   Pipeline  │  │    Indexer     │ │
-        │  └──────┬──────┘  └────────┬───────┘ │
-        │         │                  │          │
-        │  ┌──────▼──────────────────▼───────┐ │
-        │  │    Event Processing Engine      │ │
-        │  └──────┬──────────────────┬───────┘ │
-        └─────────┼──────────────────┼─────────┘
-                  │                  │
-        ┌─────────▼─────┐  ┌─────────▼──────┐
-        │ Chain Adapters │  │ Storage Engine │
-        │  - Ethereum    │  │  - Local FS    │
-        │  - Solana      │  │  - S3/R2       │
-        │  - Stellar     │  │  - MinIO       │
-        └────────────────┘  └────────────────┘
-```
-
-### Why This Architecture?
-
-#### Daemon-Based Design
-
-- Persistent State: Long-running process maintains connections to RPCs and storage
-- Resource Efficiency: Single process handles all chains, no per-chain overhead
-- Graceful Lifecycle: Clean startup/shutdown with crash recovery
-- IPC Simplicity: CLI is lightweight, daemon does the heavy lifting
-
-#### Storage Abstraction
-
-- Vendor Independence: Switch storage backends without data migration
-- Hybrid Deployments: Write locally for speed, backup to cloud for durability
-- Cost Control: Use cheap local storage for active data, archive to object storage
-
-#### Plugin-Based Chains
-
-- Extensibility: Community can add chains without modifying core
-- Maintenance: Chain-specific bugs don't affect other chains
-- Testing: Mock chain adapters for integration tests
-
-## Configuration Guide
-
-### Accessing Your Configuration
-
-**Linux/macOS:**
-
-```bash
-# View configuration
-cat ~/.config/loghaven/config.toml
-
-# Edit with default editor
-${EDITOR:-nano} ~/.config/loghaven/config.toml
-
-# Edit with specific editor
-vim ~/.config/loghaven/config.toml
-code ~/.config/loghaven/config.toml
-```
-
-**Windows (PowerShell):**
-
-```powershell
-# View configuration
-Get-Content $env:APPDATA\loghaven\config.toml
-
-# Edit with Notepad
-notepad $env:APPDATA\loghaven\config.toml
-
-# Edit with VS Code
-code $env:APPDATA\loghaven\config.toml
-```
-
-### Configuration File Structure
-
-```toml
-[meta]
-version = 1
-
-[agent]
-name = "loghaven-agent"
-log_level = "info"  # trace | debug | info | warn | error
-
-[daemon]
-socket_path = "~/.loghaven/loghaven.sock"  # Unix socket (Linux/macOS)
-tcp_port = 9090  # TCP port (Windows or fallback)
-
-[storage]
-backend = "local"  # local | s3 | r2 | minio
-primary = "local"
-# secondary = "s3"  # Optional: backup to cloud
-
-[storage.local]
-path = "~/.loghaven/data"
-max_size_gb = 10
-
-# [storage.s3]
-# bucket = "my-logs"
-# region = "us-east-1"
-# prefix = "loghaven/"
-
-# [storage.r2]
-# account_id = "your-account-id"
-# bucket = "my-logs"
-# prefix = "loghaven/"
-
-# [storage.minio]
-# endpoint = "http://localhost:9000"
-# bucket = "loghaven"
-# access_key = "minioadmin"
-# secret_key = "minioadmin"
-
-[chains]
-enabled = []  # Add chains you want to monitor
-
-# [chains.ethereum]
-# rpc_url = "https://eth-mainnet.g.alchemy.com/v2/YOUR-KEY"
-# ws_url = "wss://eth-mainnet.g.alchemy.com/v2/YOUR-KEY"
-
-# [chains.solana]
-# rpc_url = "https://api.mainnet-beta.solana.com"
-# ws_url = "wss://api.mainnet-beta.solana.com"
-
-# [chains.stellar]
-# horizon_url = "https://horizon.stellar.org"
-```
-
-### Configuration Profiles
-
-Create different configurations for different environments:
-
-```bash
-# Create dev profile
-loghaven init --profile dev
-
-# Create prod profile with S3 storage
-loghaven init --profile prod --storage s3
-
-# Run with specific profile
-loghaven run --profile dev
-loghaven run --profile prod
-```
-
-Profile locations:
-
-- **Linux/macOS:** `~/.config/loghaven/{profile}.toml`
-- **Windows:** `%APPDATA%\loghaven\{profile}.toml`
-
-### Environment Variable Overrides
-
-Override configuration without editing files:
-
-**Linux/macOS:**
-
-```bash
-export LOGHAVEN_STORAGE_BACKEND=s3
-export LOGHAVEN_LOG_LEVEL=debug
-export LOGHAVEN_DAEMON_PORT=9091
-loghaven run
-```
-
-**Windows (PowerShell):**
-
-```powershell
-$env:LOGHAVEN_STORAGE_BACKEND="s3"
-$env:LOGHAVEN_LOG_LEVEL="debug"
-$env:LOGHAVEN_DAEMON_PORT=9091
-loghaven run
-```
-
-**Windows (Command Prompt):**
-
-```cmd
-set LOGHAVEN_STORAGE_BACKEND=s3
-set LOGHAVEN_LOG_LEVEL=debug
-set LOGHAVEN_DAEMON_PORT=9091
-loghaven run
-```
-
-### Common Configuration Tasks
-
-**Change Storage Backend:**
-
-```bash
-loghaven init --storage s3 --force
-```
-
-**Enable Ethereum Monitoring:**
-
-Edit your config file and add:
-
-```toml
-[chains]
-enabled = ["ethereum"]
-
-[chains.ethereum]
-rpc_url = "https://eth-mainnet.g.alchemy.com/v2/YOUR-KEY"
-```
-
-**Increase Storage Quota:**
-
-```toml
-[storage.local]
-max_size_gb = 50  # Increase from 10GB to 50GB
-```
-
-**Change Log Level:**
-
-```toml
-[agent]
-log_level = "debug"  # Change from "info" to "debug"
-```
-
-## Development
-
-### Build from Source
+Requires Rust 1.85 or newer (edition 2024).
 
 ```bash
 git clone https://github.com/The-True-Hooha/loghaven.git
 cd loghaven
 cargo build --release
-```
-
-### Run Tests
-
-```bash
-cargo test
-```
-
-### Local Development
-
-```bash
-# Make changes
-cargo build
-
-# Test locally
-cargo run -- init
-cargo run -- run
-
-# Release build
-cargo build --release
 ./target/release/loghaven --version
+
+# or install into ~/.cargo/bin
+cargo install --path .
 ```
 
-## Project Structure
+Or straight from Git: `cargo install --git https://github.com/The-True-Hooha/loghaven`.
 
-```cmd
-loghaven/
-├── src/
-│   ├── cli/              # Command-line interface
-│   │   ├── mod.rs        # CLI structure and routing
-│   │   ├── commands.rs   # Command implementations
-│   │   └── style.rs      # Terminal styling and output
-│   ├── config/           # Configuration management
-│   │   ├── mod.rs        # Config structures and loading
-│   │   ├── defaults.rs   # Default values
-│   │   └── validation.rs # Config validation
-│   ├── error.rs          # Error types
-│   └── main.rs           # Entry point
-├── scripts/
-│   ├── install.sh        # Unix installation script
-│   └── install.ps1       # Windows installation script
-├── .github/
-│   └── workflows/
-│       ├── ci.yml        # Pull request checks
-│       ├── release.yml   # Stable releases
-│       └── nightly.yml   # Weekly dev builds
-└── Cargo.toml
+### Prebuilt binaries
+
+Release builds for Linux (x86_64), macOS (Intel and Apple Silicon) and Windows (x86_64) are attached to GitHub releases when a release is published.
+
+```bash
+# Linux / macOS (installs to /usr/local/bin)
+curl -fsSL https://raw.githubusercontent.com/The-True-Hooha/loghaven/main/scripts/install.sh | sh
 ```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/The-True-Hooha/loghaven/main/scripts/install.ps1 | iex
+```
+
+Check it worked with `loghaven --version`.
+
+## Quick start
+
+Five minutes from nothing to a log line you can query.
+
+```bash
+# 1. Create the config file
+loghaven init
+
+# 2. Create the signing keys. Do this BEFORE the first `run`:
+#    the daemon loads the public key once, at startup.
+loghaven auth keygen
+
+# 3. Optional but handy for trying things out: write to disk every second
+#    instead of every 30 seconds, and keep everything local.
+loghaven config storage.local.flush_interval_secs 1
+loghaven config storage.backend local
+
+# 4. Start the daemon (use --foreground to watch its output)
+loghaven run --foreground
+```
+
+In another terminal:
+
+```bash
+# 5. Send a few records
+loghaven send web "payment confirmed" --count 3 --chain ethereum --tx-hash 0xabc
+
+# 6. Read them back (a session is minted automatically)
+loghaven logs web
+
+# 7. Tail live
+loghaven logs web --follow
+
+# 8. Status and shutdown
+loghaven status
+loghaven stop
+```
+
+Records are buffered and written to disk on a timer (`flush_interval_secs`, default 30), so with the default config a record shows up in queries up to 30 seconds after it was sent.
+
+A longer hands-on script, including calling the HTTP API with `curl`, is in [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md).
+
+## Commands
+
+Every command accepts `--profile <NAME>` to use `<NAME>.toml` instead of `config.toml` (see [profiles](#profiles)).
+
+| Command | What it does |
+|---------|--------------|
+| `loghaven init [--force] [--storage TYPE] [--storage-path PATH]` | Write a default config file. Refuses to overwrite without `--force`. Renames a legacy `config_toml` to `config.toml`. |
+| `loghaven config <KEY> [VALUE]` | Print or set a config value. Settable keys: `storage.backend`, `storage.local.path`, `storage.local.max_size_gb`, `storage.local.rotate_size_mb`, `storage.local.rotate_records`, `storage.local.flush_interval_secs`, `storage.local.retention_days`, `agent.log_level`, `agent.name`, `daemon.tcp_port`, `daemon.socket_path`. Everything else: edit the file. Restart the daemon after changes. |
+| `loghaven run [--foreground]` | Start the daemon (in the background by default). |
+| `loghaven status` | Show PID, version, uptime, storage backend and log level. |
+| `loghaven stop [--force]` | Graceful shutdown (flushes buffers and finishes uploads). `--force` kills the process. |
+| `loghaven auth keygen [--force]` | Create an RSA-2048 keypair. `--force` replaces it; the daemon must then be restarted. |
+| `loghaven auth public-key` | Print the path of the public key. |
+| `loghaven auth token <APP> [--ttl-secs N]` | Print a signed JWT for an app (default 3600 s, max 30 days). |
+| `loghaven send <APP> <MESSAGE> [options]` | Send records. Options: `--level` (default `info`), `--source` (default `cli`), `--count`, `--chain`, `--tx-hash`, `--trace-id`. |
+| `loghaven logs <APP> [options]` | Query records. Options: `--level`, `--source`, `--from MS`, `--to MS`, `--text`, `--limit` (default 100), `--token`, `--follow`. |
+
+Short aliases: `i` (init), `r` (run), `s` (status), `st` (stop).
+
+### Reading logs
+
+```bash
+loghaven logs web                                # 100 newest records, printed oldest first
+loghaven logs web --level error --limit 20
+loghaven logs web --text timeout                 # case-insensitive, in message, tags and metadata
+loghaven logs web --from 1730000000000 --to 1730003600000   # unix milliseconds, inclusive
+loghaven logs web --follow --level error         # keep printing new matches; Ctrl+C to stop
+```
+
+Each line looks like `[timestamp_ms] level source | message chain=... tx=... trace=...`.
+
+- `--text` is a plain substring match, not a query language.
+- `--follow` cannot be combined with `--to`; `--limit` applies only to the first fetch. New records can take up to one flush interval to appear; a record that is flushed later than twice the interval plus 5 s after it arrived is not shown by `--follow`.
+- Without `--token`, `logs` reads the daemon's private key and mints a session for the app. Run it as the user that owns the key (see [Security](#security)).
+
+### Sending logs from your application
+
+For anything beyond testing, use the Rust client in `src/client` or follow the wire format in [docs/WIRE_FORMAT.md](docs/WIRE_FORMAT.md): get a session from `POST /auth`, then send signed UDP datagrams to `127.0.0.1:9100`. A record looks like:
+
+```json
+{"app": "web", "records": [{"level": "info", "source": "checkout", "message": "payment confirmed", "chain": "ethereum", "tx_hash": "0x..."}]}
+```
+
+UDP is fire-and-forget: there is no acknowledgement, and bad, replayed or cross-app datagrams are dropped silently (the daemon prints a rate-limited line).
+
+## Where things live
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Config | `~/.config/loghaven/config.toml` | `~/Library/Application Support/loghaven/config.toml` | `%APPDATA%\loghaven\config.toml` |
+| Keys | `<config dir>/keys/` | same | same |
+| Data | `~/.local/share/loghaven/data/` | `~/Library/Application Support/loghaven/data/` | `%LOCALAPPDATA%\loghaven\data\` |
+| Socket / PID | `~/.local/share/loghaven/` | `~/Library/Application Support/loghaven/` | PID in `%LOCALAPPDATA%\loghaven\`; control channel is TCP `127.0.0.1:9090` |
+
+Data layout:
+
+```
+<data>/<app>/<YYYY-MM-DD>/<ms>-<nonce>-<seq>.parquet         # a finished chunk
+<data>/<app>/<YYYY-MM-DD>/<ms>-<nonce>-<seq>.parquet.synced  # uploaded to the cloud
+```
+
+Chunks are written whole and renamed into place, so a crash never leaves a half-written file. Days are UTC dates of the record timestamps. You can read the files with any Parquet tool, for example DuckDB: `select * from 'path/to/web/2025-01-01/*.parquet'`.
+
+Columns: `id`, `app`, `timestamp_ms`, `level`, `source`, `message`, `trace_id`, `span_id`, `chain`, `tx_hash`, `tags`, `metadata`.
+
+## Ports
+
+All listeners bind to `127.0.0.1` only.
+
+| Port | Protocol | Purpose | Setting |
+|------|----------|---------|---------|
+| 9100 | UDP | Log ingest | `daemon.ingest_port` |
+| 9200 | HTTP | `POST /auth`, `GET /logs` | `auth.query_port` |
+| 9090 | TCP | CLI control (Windows only; Unix uses a socket file) | `daemon.tcp_port` |
+
+## Configuration
+
+`loghaven init` writes a complete config with defaults. The full reference, with storage backend examples (S3, R2, MinIO), is in [docs/CONFIGURATION.md](docs/CONFIGURATION.md). The settings you will touch most:
+
+```toml
+[storage]
+backend = "auto"            # auto | local | s3 | r2 | minio
+delete_after_upload = false # true removes local chunks after upload (they stop being queryable)
+
+[storage.local]
+flush_interval_secs = 30    # how soon new records become queryable
+retention_days = 30         # 0 = keep forever
+max_size_gb = 10            # 0 = no limit; oldest days are removed first
+
+[auth]
+require_auth = true         # false accepts unsigned datagrams and skips tokens (development only)
+session_ttl_secs = 3600
+```
+
+### Profiles
+
+`--profile dev` uses `dev.toml` next to `config.toml`, and a separate PID file. Profiles do not change ports or the data directory by themselves: to run two daemons at once, give each profile its own `ingest_port`, `query_port`, `tcp_port`, `socket_path` and `storage.local.path`.
+
+### Environment variables
+
+Three overrides are applied on top of the file: `LOGHAVEN_STORAGE_BACKEND`, `LOGHAVEN_LOG_LEVEL`, `LOGHAVEN_DAEMON_PORT` (sets `daemon.tcp_port`).
+
+## Security
+
+- Everything listens on loopback only. Do not forward these ports to a network.
+- With `require_auth = true` (default) every datagram is HMAC-signed with a per-session key and carries a counter, so captured datagrams cannot be replayed. A session belongs to one app and cannot write or read another app's data.
+- `keys/private.pem` is created with mode `0600` in a `0700` directory. Whoever can read it can mint a token for any app, and `send`, `auth token` and `logs` (without `--token`) read it. Treat it like a password.
+- Sessions live in memory. Restarting the daemon invalidates them; re-run the client or `loghaven send`.
+- After `auth keygen --force`, restart the daemon so it loads the new public key.
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---------|--------------|
+| `No configuration found` | Run `loghaven init`. |
+| `cannot read private key ... run 'loghaven auth keygen'` | Run `loghaven auth keygen` as the same user. |
+| `auth failed with 503 (daemon has no public key ...)` | The daemon started before the keys existed. Restart it. |
+| `auth failed with 401` | Key mismatch (keys regenerated without a restart) or expired JWT. |
+| `cannot reach query server` | Daemon not running (`loghaven status`) or `auth.query_port` differs. |
+| `logs` returns 0 records right after `send` | Not flushed yet. Wait one `flush_interval_secs`, or lower it. |
+| `Daemon already running` | `loghaven stop`; a stale PID file is cleaned up automatically. |
+| Records sent but never appear | Datagram dropped: wrong app name, replayed counter, expired session, or `require_auth` mismatch. Run with `--foreground` and read the `Ingest:` lines. |
+| `403` on `/logs` | The token belongs to a different app than the `app` parameter. |
+| Uploaded data missing from queries | `delete_after_upload = true` removes local chunks; queries only read local files. |
+
+## Roadmap
+
+LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
+
+| Phase | Theme | Status |
+|-------|-------|--------|
+| 0 - Foundation | Daemon, local storage, ingest, query API, auth, cloud sync | **Done** (v0.1, current) |
+| 1 - Usable end to end | Token CLI, client SDK, `send`, `logs --follow`, wire spec | **Done** (see [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md)) |
+| 2 - Chain awareness | Ethereum adapter, tx-hash correlation | **Next** |
+| 3 - Interfaces | TUI, dashboard | Planned |
+| 4 - Production hardening | Client-side encryption, multi-backend, persistent sessions, license | Planned |
+
+### Phase 0 - Foundation (done)
+
+- Daemon with CLI control over a Unix socket (TCP on Windows)
+- UDP ingest on `127.0.0.1:9100`: signed datagrams with replay protection, sessions scoped to one app
+- Storage as immutable Parquet chunks (`<app>/<YYYY-MM-DD>/*.parquet`), written atomically
+- Query API on `127.0.0.1:9200` (`GET /logs`): newest first, filters for level, source, time range and text, bounded in size, concurrency and time
+- S3, R2 and MinIO sync with retry; local copies are kept unless `delete_after_upload = true`
+- Pruner by retention days and size; never removes data that is not yet uploaded
+- Input validation (app names), CI-clean build, 100+ tests including an end-to-end ingest-to-query test
+
+### Phase 1 - Usable end to end (done)
+
+- `loghaven auth token <app>` prints a signed JWT
+- `loghaven send <app> <message>` sends records (signs and sequences datagrams for you)
+- `loghaven logs <app> --follow` tails live; `logs` mints its own session when no `--token` is given
+- Rust client in `src/client` (session exchange, datagram signing, batching); wire format in [docs/WIRE_FORMAT.md](docs/WIRE_FORMAT.md)
+- A language SDK crate and other-language SDKs are still to come
+
+### Phase 2 - Chain awareness
+
+- Ethereum adapter (RPC and WebSocket), normalized event format
+- Correlate on-chain transactions with off-chain logs by `tx_hash` (`loghaven trace <tx>`)
+- Solana and Stellar adapters behind the same interface
+
+### Phase 3 - Interfaces
+
+- Terminal UI
+- Local web dashboard on the query API
+
+### Phase 4 - Production hardening
+
+- Client-side encryption
+- Multiple simultaneous storage backends (`primary` / `secondary`)
+- Persistent sessions across restarts
+- Column projection in queries, dedicated writer threads
+- Choose and publish a license
+
+Details of the completed hardening work are in [docs/HARDENING_PLAN.md](docs/HARDENING_PLAN.md).
+
+## Development
+
+```bash
+cargo build
+cargo test                       # 120+ tests, no network needed
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+```
+
+`make help` lists shortcuts. CI runs test, fmt and clippy on Linux and builds on Linux, macOS and Windows.
+
+### Project structure
+
+```
+src/
+  main.rs, error.rs
+  cli/        command-line interface (clap)
+  client/     Rust client: JWT minting, session exchange, signing, batching, query, follow
+  config/     config structs, defaults, validation, env overrides
+  daemon/     lifecycle, IPC server, PID file
+  ipc/        CLI-to-daemon protocol
+  ingest/     UDP ingest server and payload parsing
+  auth/       RSA keys, JWT verification, HMAC sessions, replay window
+  query/      HTTP query API (axum)
+  storage/    Parquet chunks, queries, cloud sync, pruner, date math
+docs/
+  CONFIGURATION.md   full config reference
+  WIRE_FORMAT.md     ingest and query protocol
+  MANUAL_TESTING.md  hands-on test script
+  HARDENING_PLAN.md  record of the Phase 0 hardening work
+scripts/     install.sh, install.ps1
+```
+
+## Architecture
+
+```
+ your app --UDP datagram--> [ ingest ] --> [ per-app buffer ] --flush--> Parquet chunks on disk --> (optional) S3 / R2 / MinIO
+ CLI ------Unix socket----> [ daemon control ]
+ CLI / curl --HTTP--------> [ query API ] --reads--> Parquet chunks
+```
+
+One daemon process owns all state. The CLI is a thin client: it talks to the daemon over a local socket for `status` and `stop`, and over the HTTP API for queries. Storage is plain files, so backups, `rsync` and external tools work without the daemon.
 
 ## Philosophy
 
@@ -400,15 +342,14 @@ loghaven/
 
 ## Contributing
 
-LogHaven is in active development. Contributions are welcome!
+LogHaven is in active development. Issues and pull requests are welcome. Please run `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` before opening a PR.
 
 ## License
 
-Coming Soon!
+Not chosen yet (planned for Phase 4).
 
 ## Links
 
-- **Website:** [https://loghaven.dev](https://loghaven.dev)
-- **Documentation:** [https://loghaven.dev/docs](https://loghaven.dev/docs)
+- **Website:** <https://loghaven.dev>
 - **Issues:** <https://github.com/The-True-Hooha/loghaven/issues>
 - **Discussions:** <https://github.com/The-True-Hooha/loghaven/discussions>

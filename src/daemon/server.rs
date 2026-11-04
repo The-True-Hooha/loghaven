@@ -210,15 +210,13 @@ impl DaemonServer {
                 should_stop = true;
                 Response::success(ResponseData::Message("Shutting down".to_string()))
             }
-            Ok(Request::Reload) => {
-                Response::success(ResponseData::Message("Configuration reloaded".to_string()))
-            }
-            Ok(Request::Auth { jwt }) => {
-                match Self::handle_auth(&jwt, sessions, public_key_pem, config.auth.session_ttl_secs) {
-                    Ok(data) => Response::success(ResponseData::Session(data)),
-                    Err(e) => Response::error(e.to_string()),
-                }
-            }
+            Ok(Request::Reload) => Response::error(
+                "reload is not supported; run 'loghaven stop' then 'loghaven run'".to_string(),
+            ),
+            Ok(Request::Auth { jwt }) => match Self::handle_auth(&jwt, sessions, public_key_pem) {
+                Ok(data) => Response::success(ResponseData::Session(data)),
+                Err(e) => Response::error(e.to_string()),
+            },
             Err(_) => Response::error("Invalid request".to_string()),
         };
 
@@ -232,7 +230,6 @@ impl DaemonServer {
         jwt: &str,
         sessions: &SessionStore,
         public_key_pem: Option<&str>,
-        ttl_secs: u64,
     ) -> Result<SessionData> {
         let pem = public_key_pem.ok_or_else(|| {
             LogHavenError::Config("no public key configured; run `loghaven auth keygen`".into())
@@ -240,22 +237,45 @@ impl DaemonServer {
 
         let claims = verify_jwt(jwt, pem)?;
 
-        // Override TTL with config value; claims.exp already validated by verify_jwt
-        let _ = ttl_secs;
-        let remaining = claims.exp.saturating_sub(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        );
-
-        let (token_id, secret) = sessions.issue(&claims.sub)?;
-        let secret_hex = hex::encode(&secret);
+        let (token_id, secret, expires_in_secs) = sessions.issue_capped(
+            &claims.sub,
+            claims.exp.saturating_sub(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            ),
+        )?;
 
         Ok(SessionData {
             token_id,
-            secret_hex,
-            expires_in_secs: remaining,
+            secret_hex: hex::encode(&secret),
+            expires_in_secs,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reload_is_an_explicit_error_not_a_fake_success() {
+        let cfg = crate::config::default_config();
+        let sessions = SessionStore::new(60);
+        let (json, stop) = DaemonServer::handle_request("\"Reload\"", 0, &cfg, &sessions, None);
+        let r: Response = serde_json::from_str(&json).unwrap();
+        assert!(!r.success);
+        assert!(!stop);
+    }
+
+    #[test]
+    fn stop_sets_flag_and_garbage_is_rejected() {
+        let cfg = crate::config::default_config();
+        let sessions = SessionStore::new(60);
+        assert!(DaemonServer::handle_request("\"Stop\"", 0, &cfg, &sessions, None).1);
+        let (json, stop) = DaemonServer::handle_request("nonsense", 0, &cfg, &sessions, None);
+        assert!(!stop);
+        assert!(!serde_json::from_str::<Response>(&json).unwrap().success);
     }
 }
