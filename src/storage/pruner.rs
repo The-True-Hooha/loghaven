@@ -53,11 +53,7 @@ fn prune_sync(data_path: &PathBuf, retention_days: u32, max_size_gb: u64) {
     enforce_size_limit(data_path, max_size_gb, &mut all_date_dirs);
 }
 
-fn enforce_size_limit(
-    data_path: &PathBuf,
-    max_size_gb: u64,
-    date_dirs: &mut Vec<(String, PathBuf)>,
-) {
+fn enforce_size_limit(data_path: &PathBuf, max_size_gb: u64, date_dirs: &mut [(String, PathBuf)]) {
     let max_bytes = max_size_gb * 1024 * 1024 * 1024;
     let total = dir_size(data_path);
 

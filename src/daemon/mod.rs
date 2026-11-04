@@ -39,8 +39,7 @@ impl Daemon {
         {
             let sessions_clone = Arc::clone(&sessions);
             tokio::spawn(async move {
-                let mut ticker =
-                    tokio::time::interval(tokio::time::Duration::from_secs(3600));
+                let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(3600));
                 loop {
                     ticker.tick().await;
                     sessions_clone.purge_expired();

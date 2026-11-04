@@ -268,6 +268,7 @@ pub fn stop(force: bool, profile: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn logs(
     app: String,
     level: Option<String>,

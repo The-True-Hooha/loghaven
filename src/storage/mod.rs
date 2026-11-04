@@ -134,47 +134,48 @@ fn auto_detect_syncer(
     data_path: std::path::PathBuf,
 ) -> Option<std::sync::Arc<CloudSyncer>> {
     // S3 keys present?
-    if let Some(s3) = &config.storage.s3 {
-        if let (Some(key), Some(secret)) = (&s3.access_key, &s3.secret_key) {
-            return Some(CloudSyncer::new_s3(
-                s3.bucket.clone(),
-                s3.region.clone(),
-                s3.prefix.clone(),
-                key.clone(),
-                secret.clone(),
-                data_path,
-                true,
-            ));
-        }
+    if let Some(s3) = &config.storage.s3
+        && let (Some(key), Some(secret)) = (&s3.access_key, &s3.secret_key)
+    {
+        return Some(CloudSyncer::new_s3(
+            s3.bucket.clone(),
+            s3.region.clone(),
+            s3.prefix.clone(),
+            key.clone(),
+            secret.clone(),
+            data_path,
+            true,
+        ));
     }
 
     // R2 keys present?
-    if let Some(r2) = &config.storage.r2 {
-        if let (Some(key), Some(secret)) = (&r2.access_key, &r2.secret_key) {
-            return Some(CloudSyncer::new_r2(
-                r2.bucket.clone(),
-                r2.account_id.clone(),
-                r2.prefix.clone(),
-                key.clone(),
-                secret.clone(),
-                data_path,
-                true,
-            ));
-        }
+    if let Some(r2) = &config.storage.r2
+        && let (Some(key), Some(secret)) = (&r2.access_key, &r2.secret_key)
+    {
+        return Some(CloudSyncer::new_r2(
+            r2.bucket.clone(),
+            r2.account_id.clone(),
+            r2.prefix.clone(),
+            key.clone(),
+            secret.clone(),
+            data_path,
+            true,
+        ));
     }
 
     // MinIO configured?
-    if let Some(m) = &config.storage.minio {
-        if !m.access_key.is_empty() && !m.secret_key.is_empty() {
-            return Some(CloudSyncer::new_minio(
-                m.bucket.clone(),
-                m.endpoint.clone(),
-                m.access_key.clone(),
-                m.secret_key.clone(),
-                data_path,
-                true,
-            ));
-        }
+    if let Some(m) = &config.storage.minio
+        && !m.access_key.is_empty()
+        && !m.secret_key.is_empty()
+    {
+        return Some(CloudSyncer::new_minio(
+            m.bucket.clone(),
+            m.endpoint.clone(),
+            m.access_key.clone(),
+            m.secret_key.clone(),
+            data_path,
+            true,
+        ));
     }
 
     // No cloud config found — fall back to local only

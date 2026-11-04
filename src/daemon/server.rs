@@ -214,7 +214,12 @@ impl DaemonServer {
                 Response::success(ResponseData::Message("Configuration reloaded".to_string()))
             }
             Ok(Request::Auth { jwt }) => {
-                match Self::handle_auth(&jwt, sessions, public_key_pem, config.auth.session_ttl_secs) {
+                match Self::handle_auth(
+                    &jwt,
+                    sessions,
+                    public_key_pem,
+                    config.auth.session_ttl_secs,
+                ) {
                     Ok(data) => Response::success(ResponseData::Session(data)),
                     Err(e) => Response::error(e.to_string()),
                 }

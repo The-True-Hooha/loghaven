@@ -32,22 +32,22 @@ impl Default for QueryFilter {
 }
 
 pub fn query(
-    data_path: &PathBuf,
+    data_path: &std::path::Path,
     filter: &QueryFilter,
     index: Option<&Arc<AppIndex>>,
 ) -> Result<Vec<LogRecord>> {
-    if let Some(text) = &filter.text {
-        if let Some(idx) = index {
-            let mut results = idx.search(text, filter.limit)?;
-            results = apply_filters(results, filter);
-            return Ok(results);
-        }
+    if let Some(text) = &filter.text
+        && let Some(idx) = index
+    {
+        let mut results = idx.search(text, filter.limit)?;
+        results = apply_filters(results, filter);
+        return Ok(results);
     }
 
     scan_parquet(data_path, filter)
 }
 
-fn scan_parquet(data_path: &PathBuf, filter: &QueryFilter) -> Result<Vec<LogRecord>> {
+fn scan_parquet(data_path: &std::path::Path, filter: &QueryFilter) -> Result<Vec<LogRecord>> {
     let app_dir = data_path.join(&filter.app);
     if !app_dir.exists() {
         return Ok(vec![]);
@@ -249,25 +249,25 @@ fn read_parquet_file(path: &PathBuf) -> Result<Vec<LogRecord>> {
 }
 
 fn matches_filter(record: &LogRecord, filter: &QueryFilter) -> bool {
-    if let Some(source) = &filter.source {
-        if &record.source != source {
-            return false;
-        }
+    if let Some(source) = &filter.source
+        && &record.source != source
+    {
+        return false;
     }
-    if let Some(level) = &filter.level {
-        if &record.level != level {
-            return false;
-        }
+    if let Some(level) = &filter.level
+        && &record.level != level
+    {
+        return false;
     }
-    if let Some(from) = filter.from_ms {
-        if record.timestamp_ms < from {
-            return false;
-        }
+    if let Some(from) = filter.from_ms
+        && record.timestamp_ms < from
+    {
+        return false;
     }
-    if let Some(to) = filter.to_ms {
-        if record.timestamp_ms > to {
-            return false;
-        }
+    if let Some(to) = filter.to_ms
+        && record.timestamp_ms > to
+    {
+        return false;
     }
     true
 }

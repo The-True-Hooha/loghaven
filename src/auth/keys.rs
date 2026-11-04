@@ -1,5 +1,7 @@
 use crate::error::{LogHavenError, Result};
-use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey, LineEnding};
+use rsa::pkcs8::{
+    DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey, LineEnding,
+};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use std::path::Path;
 

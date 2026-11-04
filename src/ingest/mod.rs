@@ -110,10 +110,9 @@ fn parse_payload(data: &[u8]) -> Option<IngestPayload> {
         .first()
         .map(|&b| b != b'{' && b != b'[')
         .unwrap_or(false)
+        && let Ok(p) = rmp_serde::from_slice::<IngestPayload>(data)
     {
-        if let Ok(p) = rmp_serde::from_slice::<IngestPayload>(data) {
-            return Some(p);
-        }
+        return Some(p);
     }
 
     None

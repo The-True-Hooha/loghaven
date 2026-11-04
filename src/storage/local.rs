@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, interval};
 
 enum WriteCommand {
-    Record(LogRecord),
+    Record(Box<LogRecord>),
     Flush,
     Shutdown(oneshot::Sender<Result<()>>),
 }
@@ -71,7 +71,7 @@ impl LocalBackend {
 
     pub async fn write(&self, record: LogRecord) -> Result<()> {
         self.sender
-            .send(WriteCommand::Record(record))
+            .send(WriteCommand::Record(Box::new(record)))
             .await
             .map_err(|_| LogHavenError::Storage("write channel closed".into()))
     }
@@ -120,7 +120,7 @@ async fn writer_task(
             cmd = rx.recv() => {
                 match cmd {
                     Some(WriteCommand::Record(r)) => {
-                        buffer.push(r);
+                        buffer.push(*r);
                         if buffer.len() >= 10_000 {
                             maybe_upload(
                                 do_flush(&mut buffer, &mut state, &data_path, &app, &index, rotate_size_bytes, rotate_records),
@@ -175,7 +175,7 @@ fn maybe_upload(completed_path: Option<PathBuf>, syncer: &Option<Arc<CloudSyncer
 fn do_flush(
     buffer: &mut Vec<LogRecord>,
     state: &mut WriterState,
-    data_path: &PathBuf,
+    data_path: &std::path::Path,
     app: &str,
     index: &AppIndex,
     rotate_size_bytes: u64,
@@ -214,9 +214,10 @@ fn do_flush(
 
     write_to_writer(buffer, state, index);
 
-    let should_rotate = state.writer.as_ref().map_or(false, |w| {
-        w.size_bytes() >= rotate_size_bytes || w.record_count >= rotate_records
-    });
+    let should_rotate = state
+        .writer
+        .as_ref()
+        .is_some_and(|w| w.size_bytes() >= rotate_size_bytes || w.record_count >= rotate_records);
 
     if should_rotate {
         let old = state.writer.take().unwrap();
@@ -236,23 +237,23 @@ fn write_to_writer(buffer: &mut Vec<LogRecord>, state: &mut WriterState, index: 
     for record in buffer.iter() {
         let _ = index.add_record(record);
     }
-    if let Some(w) = state.writer.as_mut() {
-        if let Err(e) = w.write_batch(buffer) {
-            eprintln!("Storage write error: {}", e);
-        }
+    if let Some(w) = state.writer.as_mut()
+        && let Err(e) = w.write_batch(buffer)
+    {
+        eprintln!("Storage write error: {}", e);
     }
     state.total_records += buffer.len() as u64;
     buffer.clear();
 }
 
-fn chunk_path(data_path: &PathBuf, app: &str, date: &str, chunk: u32) -> PathBuf {
+fn chunk_path(data_path: &std::path::Path, app: &str, date: &str, chunk: u32) -> PathBuf {
     data_path
         .join(app)
         .join(date)
         .join(format!("{:05}.parquet", chunk))
 }
 
-fn next_chunk_id(data_path: &PathBuf, app: &str, date: &str) -> u32 {
+fn next_chunk_id(data_path: &std::path::Path, app: &str, date: &str) -> u32 {
     let dir = data_path.join(app).join(date);
     if !dir.exists() {
         return 0;

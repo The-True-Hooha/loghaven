@@ -166,7 +166,17 @@ pub fn execute(cli: Cli) -> crate::error::Result<()> {
             limit,
             token,
             profile,
-        }) => commands::logs(app, level, source, from, to, text, limit, token, profile.as_deref()),
+        }) => commands::logs(
+            app,
+            level,
+            source,
+            from,
+            to,
+            text,
+            limit,
+            token,
+            profile.as_deref(),
+        ),
         Some(Commands::Auth { command }) => match command {
             AuthCommands::Keygen { force, profile } => {
                 commands::auth_keygen(force, profile.as_deref())
