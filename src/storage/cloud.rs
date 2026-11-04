@@ -176,7 +176,7 @@ impl CloudSyncer {
     }
 }
 
-fn marker_path(chunk: &Path) -> PathBuf {
+pub(crate) fn marker_path(chunk: &Path) -> PathBuf {
     chunk.with_extension(format!("parquet.{SYNCED_SUFFIX}"))
 }
 

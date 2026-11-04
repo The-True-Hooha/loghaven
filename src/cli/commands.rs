@@ -97,7 +97,7 @@ pub fn run(foreground: bool, profile: Option<&str>) -> Result<()> {
         daemon.run().await
     });
     // signal and IPC shutdowns end here too, so the PID file never outlives the daemon
-    let _ = DaemonProcess::remove_pid(profile);
+    DaemonProcess::remove_pid_if_owner(profile);
     result?;
 
     style::success("Agent started");

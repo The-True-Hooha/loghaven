@@ -51,6 +51,7 @@ impl Daemon {
             self.config.storage.local.path.clone(),
             self.config.storage.local.retention_days,
             self.config.storage.local.max_size_gb,
+            storage.has_cloud_sync(),
         ));
 
         let ingest = IngestServer::new(

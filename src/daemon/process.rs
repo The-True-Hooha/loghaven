@@ -111,6 +111,17 @@ impl DaemonProcess {
         Ok(())
     }
 
+    /// Removes the PID file only if it still names this process, so a failed
+    /// second instance or a late exit never deletes another daemon's file.
+    pub fn remove_pid_if_owner(profile: Option<&str>) {
+        let file = Self::get_pid_file(profile);
+        if let Ok(s) = fs::read_to_string(&file)
+            && s.trim() == std::process::id().to_string()
+        {
+            let _ = fs::remove_file(&file);
+        }
+    }
+
     pub fn remove_pid(profile: Option<&str>) -> Result<()> {
         let pid_file = Self::get_pid_file(profile);
 
@@ -143,5 +154,24 @@ impl DaemonProcess {
     pub fn daemonize() -> Result<()> {
         // Windows doesn't fork, just continue running, lol
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pid_file_is_only_removed_by_its_owner() {
+        let profile = format!("test-owner-{}", std::process::id());
+        let file = DaemonProcess::get_pid_file(Some(&profile));
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "999999999").unwrap();
+        DaemonProcess::remove_pid_if_owner(Some(&profile));
+        assert!(file.exists(), "foreign pid kept");
+        DaemonProcess::write_pid(Some(&profile)).unwrap();
+        DaemonProcess::remove_pid_if_owner(Some(&profile));
+        assert!(!file.exists());
+        DaemonProcess::remove_pid_if_owner(Some(&profile)); // missing file is fine
     }
 }

@@ -212,4 +212,64 @@ mod tests {
         assert!(!tmp.exists() || std::fs::read_dir(&tmp).unwrap().next().is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[tokio::test]
+    async fn end_to_end_signed_udp_to_query() {
+        let (storage, tmp) = router("e2e");
+        let sessions = Arc::new(SessionStore::new(60));
+        let (id, secret, _) = sessions.issue("web").unwrap();
+
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = {
+            let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            probe.local_addr().unwrap().port()
+        };
+        let server = IngestServer::new(port, Arc::clone(&storage), Arc::clone(&sessions), true);
+        let handle = tokio::spawn(async move { server.listen().await });
+        let dest = format!("127.0.0.1:{port}");
+        let q = || {
+            let f = crate::storage::query::QueryFilter {
+                app: "web".into(),
+                ..Default::default()
+            };
+            crate::storage::query::query(&tmp, &f).unwrap().len()
+        };
+
+        // the first datagram may be sent before the server is bound: resend with fresh counters
+        let mut counter = 1;
+        let mut count = 0;
+        for _ in 0..100 {
+            assert!(!handle.is_finished(), "ingest server exited early");
+            let d = sign_datagram(&id, &secret, counter, &payload("web")).unwrap();
+            sock.send_to(&d, &dest).await.unwrap();
+            counter += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            storage.flush_all().await.unwrap();
+            count = q();
+            if count > 0 {
+                break;
+            }
+        }
+        assert!(count >= 1, "signed datagram never landed");
+        let landed = count;
+
+        // everything below must be rejected; send, give the server time, re-check
+        let last = sign_datagram(&id, &secret, counter - 1, &payload("web")).unwrap();
+        sock.send_to(&last, &dest).await.unwrap(); // replay
+        let other_app = sign_datagram(&id, &secret, counter, &payload("api")).unwrap();
+        sock.send_to(&other_app, &dest).await.unwrap(); // wrong app
+        sock.send_to(&payload("web"), &dest).await.unwrap(); // unsigned
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        storage.flush_all().await.unwrap();
+        assert_eq!(
+            q(),
+            landed,
+            "replayed, cross-app and unsigned datagrams are dropped"
+        );
+        assert!(!tmp.join("api").exists());
+
+        handle.abort();
+        storage.shutdown_all().await.unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

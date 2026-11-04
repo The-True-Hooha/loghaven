@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use tokio::time::{Duration, interval};
 
 const PRUNE_INTERVAL: Duration = Duration::from_secs(3600);
+/// A day directory touched more recently than this is left alone: a writer may still be flushing into it.
+const MIN_AGE: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Default, PartialEq)]
 pub struct PruneReport {
@@ -12,7 +14,12 @@ pub struct PruneReport {
 }
 
 /// Prunes once at startup and then hourly. A limit of 0 disables that limit.
-pub async fn run_pruner(data_path: PathBuf, retention_days: u32, max_size_gb: u64) {
+pub async fn run_pruner(
+    data_path: PathBuf,
+    retention_days: u32,
+    max_size_gb: u64,
+    require_synced: bool,
+) {
     let max_bytes = max_size_gb.saturating_mul(1024 * 1024 * 1024);
     let mut ticker = interval(PRUNE_INTERVAL);
 
@@ -20,7 +27,14 @@ pub async fn run_pruner(data_path: PathBuf, retention_days: u32, max_size_gb: u6
         ticker.tick().await;
         let path = data_path.clone();
         let report = tokio::task::spawn_blocking(move || {
-            prune_once(&path, today_epoch_days(), retention_days, max_bytes)
+            prune_once(
+                &path,
+                today_epoch_days(),
+                retention_days,
+                max_bytes,
+                require_synced,
+                MIN_AGE,
+            )
         })
         .await;
         match report {
@@ -54,9 +68,13 @@ pub fn prune_once(
     today: i64,
     retention_days: u32,
     max_bytes: u64,
+    require_synced: bool,
+    min_age: Duration,
 ) -> PruneReport {
     let mut report = PruneReport::default();
     let mut dirs = date_dirs(data_path);
+    // With a cloud backend, a day holding chunks that were never uploaded is the only copy.
+    dirs.retain(|(_, p)| !is_recent(p, min_age) && !(require_synced && has_unsynced(p)));
 
     if retention_days > 0 {
         let cutoff = today.saturating_sub(retention_days as i64);
@@ -89,6 +107,25 @@ pub fn prune_once(
     }
 
     report
+}
+
+fn is_recent(path: &Path, min_age: Duration) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < min_age)
+}
+
+fn has_unsynced(day_dir: &Path) -> bool {
+    let Ok(files) = std::fs::read_dir(day_dir) else {
+        return true; // unreadable: do not risk deleting it
+    };
+    files.flatten().any(|f| {
+        let p = f.path();
+        p.extension().and_then(|e| e.to_str()) == Some("parquet")
+            && !crate::storage::cloud::marker_path(&p).exists()
+    })
 }
 
 fn remove(path: &Path, report: &mut PruneReport) -> bool {
@@ -191,7 +228,7 @@ mod tests {
         let edge = fx.file(&format!("web/{}/a.parquet", day(-30)), 10);
         let today = fx.file(&format!("web/{}/a.parquet", day(0)), 10);
         let other = fx.file(&format!("api/{}/a.parquet", day(-100)), 10);
-        let r = prune_once(&fx.0, TODAY, 30, 0);
+        let r = prune_once(&fx.0, TODAY, 30, 0, false, Duration::ZERO);
         assert!(!old.exists() && !other.exists());
         assert!(edge.exists() && today.exists(), "cutoff day itself is kept");
         assert_eq!(r.removed.len(), 2);
@@ -205,7 +242,7 @@ mod tests {
         let bad = fx.file("web/2000-13-45/a.parquet", 100);
         let top = fx.file("loose.txt", 100);
         let oldname = fx.file("web/1999-01-01x/a", 100);
-        prune_once(&fx.0, TODAY, 1, 1);
+        prune_once(&fx.0, TODAY, 1, 1, false, Duration::ZERO);
         for p in [index, stray, bad, top, oldname] {
             assert!(p.exists(), "{}", p.display());
         }
@@ -215,7 +252,7 @@ mod tests {
     fn zero_disables_each_limit() {
         let fx = Fixture::new("zero");
         let old = fx.file(&format!("web/{}/a.parquet", day(-5000)), 1000);
-        let r = prune_once(&fx.0, TODAY, 0, 0);
+        let r = prune_once(&fx.0, TODAY, 0, 0, false, Duration::ZERO);
         assert!(old.exists());
         assert_eq!(r, PruneReport::default());
     }
@@ -227,7 +264,7 @@ mod tests {
         let b = fx.file(&format!("api/{}/a", day(-2)), 100);
         let c = fx.file(&format!("web/{}/a", day(-1)), 100);
         let t = fx.file(&format!("web/{}/a", day(0)), 100);
-        let r = prune_once(&fx.0, TODAY, 0, 250);
+        let r = prune_once(&fx.0, TODAY, 0, 250, false, Duration::ZERO);
         assert!(!a.exists() && !b.exists(), "two oldest evicted");
         assert!(c.exists() && t.exists());
         assert_eq!(r.bytes_over_limit, 0);
@@ -239,7 +276,7 @@ mod tests {
         let t = fx.file(&format!("web/{}/a", day(0)), 500);
         let f = fx.file(&format!("web/{}/a", day(3)), 500);
         let old = fx.file(&format!("web/{}/a", day(-1)), 100);
-        let r = prune_once(&fx.0, TODAY, 0, 200);
+        let r = prune_once(&fx.0, TODAY, 0, 200, false, Duration::ZERO);
         assert!(t.exists() && f.exists());
         assert!(!old.exists());
         assert_eq!(r.bytes_over_limit, 1000 - 200);
@@ -250,7 +287,7 @@ mod tests {
         let fx = Fixture::new("index");
         let index = fx.file("web/index/segment", 1000);
         let old = fx.file(&format!("web/{}/a", day(-1)), 100);
-        let r = prune_once(&fx.0, TODAY, 0, 500);
+        let r = prune_once(&fx.0, TODAY, 0, 500, false, Duration::ZERO);
         assert!(index.exists());
         assert!(!old.exists());
         assert_eq!(r.bytes_over_limit, 500);
@@ -259,7 +296,7 @@ mod tests {
     #[test]
     fn missing_data_dir_is_a_noop() {
         let fx = Fixture::new("missing");
-        let r = prune_once(&fx.0.join("nope"), TODAY, 30, 1);
+        let r = prune_once(&fx.0.join("nope"), TODAY, 30, 1, false, Duration::ZERO);
         assert_eq!(r, PruneReport::default());
     }
 
@@ -272,7 +309,7 @@ mod tests {
         std::fs::create_dir_all(fx.0.join("web")).unwrap();
         let link = fx.0.join("web").join(day(-500));
         std::os::unix::fs::symlink(&outside.0, &link).unwrap();
-        prune_once(&fx.0, TODAY, 1, 1);
+        prune_once(&fx.0, TODAY, 1, 1, false, Duration::ZERO);
         assert!(victim.exists());
         assert!(link.symlink_metadata().is_ok());
     }
@@ -283,7 +320,31 @@ mod tests {
         let fx = Fixture::new("math");
         let kept = fx.file("web/2024-02-01/a", 1); // exactly 29 days before: kept at 29
         let gone = fx.file("web/2024-01-31/a", 1);
-        prune_once(&fx.0, today, 29, 0);
+        prune_once(&fx.0, today, 29, 0, false, Duration::ZERO);
         assert!(kept.exists() && !gone.exists());
+    }
+
+    #[test]
+    fn unsynced_days_are_kept_when_cloud_sync_is_configured() {
+        let fx = Fixture::new("unsynced");
+        let synced = fx.file(&format!("web/{}/a.parquet", day(-50)), 10);
+        fx.file(&format!("web/{}/a.parquet.synced", day(-50)), 0);
+        let pending = fx.file(&format!("web/{}/a.parquet", day(-60)), 10);
+        let mixed = fx.file(&format!("web/{}/a.parquet", day(-70)), 10);
+        fx.file(&format!("web/{}/b.parquet", day(-70)), 10);
+        fx.file(&format!("web/{}/b.parquet.synced", day(-70)), 0);
+        prune_once(&fx.0, TODAY, 30, 1, true, Duration::ZERO);
+        assert!(!synced.exists(), "fully synced day is pruned");
+        assert!(pending.exists() && mixed.exists(), "unsynced data survives");
+        prune_once(&fx.0, TODAY, 30, 0, false, Duration::ZERO);
+        assert!(!pending.exists(), "no cloud: nothing to wait for");
+    }
+
+    #[test]
+    fn recently_modified_days_are_left_alone() {
+        let fx = Fixture::new("recent");
+        let p = fx.file(&format!("web/{}/a.parquet", day(-60)), 10);
+        prune_once(&fx.0, TODAY, 30, 1, false, Duration::from_secs(3600));
+        assert!(p.exists());
     }
 }

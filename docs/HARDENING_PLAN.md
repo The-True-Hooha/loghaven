@@ -80,5 +80,10 @@ Tests: config path, URL building, IPC protocol round trip.
 ## Step 8 - Integration test and final review
 End-to-end test: start ingest + query on ephemeral ports against a temp dir, send signed datagrams, query them back. Full-repo adversarial pass. README and this document updated.
 
+## Status
+Steps 0-8 implemented. Pruner additionally skips day directories with unsynced chunks when a cloud backend is configured, and day directories modified within the last hour. PID file is removed only by its owner.
+
+Known limits: chunk I/O on the async worker; full chunk decode per query; tantivy index is write-only; `init` does not migrate a legacy `config_toml`; PID file write is not an exclusive lock.
+
 ## Out of scope
 Chain adapters, TUI/dashboard, multi-backend `primary`/`secondary`, client-side encryption, persistent sessions.

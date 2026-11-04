@@ -59,6 +59,20 @@ impl StorageRouter {
         Ok(b)
     }
 
+    pub fn has_cloud_sync(&self) -> bool {
+        self.cloud_syncer.is_some()
+    }
+
+    /// Writes every app's buffered records to disk.
+    pub async fn flush_all(&self) -> Result<()> {
+        let backends: Vec<Arc<LocalBackend>> =
+            { self.backends.lock().unwrap().values().cloned().collect() };
+        for b in backends {
+            b.flush().await?;
+        }
+        Ok(())
+    }
+
     pub async fn shutdown_all(&self) -> Result<()> {
         let backends: Vec<Arc<LocalBackend>> =
             { self.backends.lock().unwrap().values().cloned().collect() };
