@@ -45,17 +45,18 @@ pub async fn post_auth(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let remaining = claims.exp.saturating_sub(now);
-
-    let (token_id, secret) = state
+    let (token_id, secret, expires_in_secs) = state
         .sessions
-        .issue(&claims.sub)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .issue_capped(&claims.sub, claims.exp.saturating_sub(now))
+        .map_err(|e| match e {
+            crate::error::LogHavenError::InvalidApp(_) => StatusCode::FORBIDDEN,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        })?;
 
     Ok(Json(SessionData {
         token_id,
         secret_hex: hex::encode(secret),
-        expires_in_secs: remaining,
+        expires_in_secs,
     }))
 }
 
@@ -82,17 +83,28 @@ pub async fn get_logs(
     headers: HeaderMap,
     Query(params): Query<LogsParams>,
 ) -> Result<Json<LogsResponse>, (StatusCode, String)> {
-    if state.require_auth {
+    let session_app = if state.require_auth {
         let token = extract_bearer(&headers)
             .ok_or((StatusCode::UNAUTHORIZED, "missing Bearer token".into()))?;
-        state
-            .sessions
-            .verify_session_token(&token)
-            .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
-    }
+        Some(
+            state
+                .sessions
+                .verify_session_token(&token)
+                .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?,
+        )
+    } else {
+        None
+    };
 
     if let Err(e) = crate::storage::validate_app_name(&params.app) {
         return Err((StatusCode::BAD_REQUEST, format!("invalid app: {}", e)));
+    }
+
+    if session_app.is_some_and(|app| app != params.app) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "token is not authorized for this app".into(),
+        ));
     }
 
     let filter = QueryFilter {
@@ -153,6 +165,40 @@ mod tests {
             let r = get_logs(State(state()), HeaderMap::new(), Query(params(app))).await;
             assert_eq!(r.err().unwrap().0, StatusCode::BAD_REQUEST, "{app:?}");
         }
+    }
+
+    fn auth_state() -> (QueryState, String, String) {
+        let mut st = state();
+        st.require_auth = true;
+        let (web, _, _) = st.sessions.issue("web").unwrap();
+        let (api, _, _) = st.sessions.issue("api").unwrap();
+        (st, web, api)
+    }
+
+    fn bearer(tok: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", format!("Bearer {tok}").parse().unwrap());
+        h
+    }
+
+    #[tokio::test]
+    async fn logs_requires_token_when_auth_enabled() {
+        let (st, _, _) = auth_state();
+        let r = get_logs(State(st.clone()), HeaderMap::new(), Query(params("web"))).await;
+        assert_eq!(r.err().unwrap().0, StatusCode::UNAUTHORIZED);
+        let r = get_logs(State(st), bearer("bogus"), Query(params("web"))).await;
+        assert_eq!(r.err().unwrap().0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn logs_token_is_scoped_to_its_app() {
+        let (st, web, _api) = auth_state();
+        let r = get_logs(State(st.clone()), bearer(&web), Query(params("api"))).await;
+        assert_eq!(r.err().unwrap().0, StatusCode::FORBIDDEN);
+        let ok = get_logs(State(st), bearer(&web), Query(params("web")))
+            .await
+            .unwrap();
+        assert_eq!(ok.0.count, 0);
     }
 
     #[tokio::test]

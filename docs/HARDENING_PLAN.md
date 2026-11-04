@@ -24,11 +24,13 @@ Problems:
 - `/logs` lets any valid token read any app.
 - Datagrams carry no freshness, so a captured datagram can be replayed until the session expires.
 - `expires_in_secs` reports the JWT remaining time while the store enforces `session_ttl_secs`.
+- `/auth` can mint unlimited sessions per subject.
 Change:
-- Datagram header becomes `token_id:counter:hmac_hex\n`; HMAC covers `counter || payload`; the session keeps the highest accepted counter and rejects anything not strictly greater. Verification runs inline in the recv loop so ordering is preserved.
+- Datagram header becomes `token_id:counter:hmac_hex\n`; HMAC covers `counter || payload`. The session keeps the highest accepted counter plus a 64-wide bitmap, so each counter is accepted once and mild UDP reordering is tolerated. Counters start at 1; `u64::MAX` is reserved. The MAC is checked before the counter so forged datagrams cannot move it.
 - Ingest requires `payload.app == session.app`.
 - `/logs` requires `params.app == session.app`.
-- `SessionData.expires_in_secs` reports the real session expiry.
+- A session lives for `min(session_ttl_secs, remaining JWT life)` and `expires_in_secs` reports exactly that. At most 32 live sessions per app; the oldest is evicted.
+- Known limit: the app-scope check happens after the counter is consumed, so a mismatched datagram burns its counter (the datagram is dropped either way).
 Tests: replay, lower counter, wrong app, expired session, bad hmac, tampered counter, query cross-app.
 
 ## Step 3 - Storage durability and visibility
