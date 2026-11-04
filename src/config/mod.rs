@@ -289,10 +289,22 @@ pub fn get_config_path(profile: Option<&str>) -> PathBuf {
     let config_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("loghaven");
+    config_path_in(&config_dir, profile)
+}
 
+fn config_path_in(config_dir: &std::path::Path, profile: Option<&str>) -> PathBuf {
     match profile {
         Some(p) => config_dir.join(format!("{}.toml", p)),
-        None => config_dir.join("config_toml"),
+        None => {
+            let path = config_dir.join("config.toml");
+            // earlier versions wrote "config_toml" by mistake
+            let legacy = config_dir.join("config_toml");
+            if !path.exists() && legacy.exists() {
+                legacy
+            } else {
+                path
+            }
+        }
     }
 }
 
@@ -304,5 +316,24 @@ pub fn default_config() -> Config {
         storage: StorageConfig::default(),
         chains: ChainsConfig::default(),
         auth: AuthConfig::default(),
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn default_name_and_legacy_fallback() {
+        let dir = std::env::temp_dir().join(format!("lh-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(config_path_in(&dir, None), dir.join("config.toml"));
+        assert_eq!(config_path_in(&dir, Some("dev")), dir.join("dev.toml"));
+        std::fs::write(dir.join("config_toml"), "").unwrap();
+        assert_eq!(config_path_in(&dir, None), dir.join("config_toml"));
+        std::fs::write(dir.join("config.toml"), "").unwrap();
+        assert_eq!(config_path_in(&dir, None), dir.join("config.toml"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

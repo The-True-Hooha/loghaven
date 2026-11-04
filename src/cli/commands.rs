@@ -92,10 +92,13 @@ pub fn run(foreground: bool, profile: Option<&str>) -> Result<()> {
     style::success(&format!("Log level: {}", cfg.agent.log_level));
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
+    let result = rt.block_on(async {
         let mut daemon = Daemon::new(cfg);
         daemon.run().await
-    })?;
+    });
+    // signal and IPC shutdowns end here too, so the PID file never outlives the daemon
+    let _ = DaemonProcess::remove_pid(profile);
+    result?;
 
     style::success("Agent started");
 
@@ -268,6 +271,34 @@ pub fn stop(force: bool, profile: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn logs_params(
+    app: &str,
+    limit: usize,
+    level: &Option<String>,
+    source: &Option<String>,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
+    text: &Option<String>,
+) -> Vec<(&'static str, String)> {
+    let mut p = vec![("app", app.to_string()), ("limit", limit.to_string())];
+    if let Some(v) = level {
+        p.push(("level", v.clone()));
+    }
+    if let Some(v) = source {
+        p.push(("source", v.clone()));
+    }
+    if let Some(v) = from_ms {
+        p.push(("from_ms", v.to_string()));
+    }
+    if let Some(v) = to_ms {
+        p.push(("to_ms", v.to_string()));
+    }
+    if let Some(v) = text {
+        p.push(("text", v.clone()));
+    }
+    p
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn logs(
     app: String,
@@ -283,30 +314,13 @@ pub fn logs(
     let config_path = config::get_config_path(profile);
     let cfg = Config::load(&config_path)?;
 
-    let mut url = format!(
-        "http://127.0.0.1:{}/logs?app={}&limit={}",
-        cfg.auth.query_port, app, limit
-    );
-    if let Some(l) = &level {
-        url.push_str(&format!("&level={}", l));
-    }
-    if let Some(s) = &source {
-        url.push_str(&format!("&source={}", s));
-    }
-    if let Some(f) = from_ms {
-        url.push_str(&format!("&from_ms={}", f));
-    }
-    if let Some(t) = to_ms {
-        url.push_str(&format!("&to_ms={}", t));
-    }
-    if let Some(t) = &text {
-        url.push_str(&format!("&text={}", t));
-    }
+    let url = format!("http://127.0.0.1:{}/logs", cfg.auth.query_port);
+    let params = logs_params(&app, limit, &level, &source, from_ms, to_ms, &text);
 
     let rt = tokio::runtime::Runtime::new()?;
     let records = rt.block_on(async {
         let client = reqwest::Client::new();
-        let mut req = client.get(&url);
+        let mut req = client.get(&url).query(&params);
         if let Some(tok) = &token {
             req = req.header("authorization", format!("Bearer {}", tok));
         }
@@ -398,4 +412,32 @@ pub fn auth_public_key(profile: Option<&str>) -> Result<()> {
 
     println!("{}", public_path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logs_params_are_structured_not_string_spliced() {
+        let text = Some("a&app=evil #x=y".to_string());
+        let p = logs_params("web", 5, &None, &None, Some(1), None, &text);
+        assert_eq!(p[0], ("app", "web".to_string()));
+        assert_eq!(p[1], ("limit", "5".to_string()));
+        assert!(p.contains(&("from_ms", "1".to_string())));
+        assert!(p.contains(&("text", "a&app=evil #x=y".to_string())));
+        assert!(!p.iter().any(|(k, _)| *k == "to_ms" || *k == "level"));
+        let req = reqwest::Client::new()
+            .get("http://127.0.0.1:1/logs")
+            .query(&p)
+            .build()
+            .unwrap();
+        let pairs: Vec<_> = req.url().query_pairs().collect();
+        assert_eq!(pairs.iter().filter(|(k, _)| k == "app").count(), 1);
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| k == "text" && v == "a&app=evil #x=y")
+        );
+    }
 }
