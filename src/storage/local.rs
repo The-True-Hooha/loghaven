@@ -2,7 +2,6 @@ use crate::config::LocalStorageConfig;
 use crate::error::{LogHavenError, Result};
 use crate::storage::cloud::CloudSyncer;
 use crate::storage::date::date_from_ms;
-use crate::storage::index::AppIndex;
 use crate::storage::record::LogRecord;
 use crate::storage::writer::{remove_stale_tmp, write_chunk};
 use std::collections::BTreeMap;
@@ -25,7 +24,6 @@ enum WriteCommand {
 
 pub struct LocalBackend {
     sender: mpsc::Sender<WriteCommand>,
-    pub index: Arc<AppIndex>,
     pub data_path: PathBuf,
     pub app: String,
 }
@@ -43,7 +41,7 @@ impl LocalBackend {
         crate::storage::validate_app_name(&app)?;
         let data_path = config.path.clone();
         let app_dir = data_path.join(&app);
-        let index = Arc::new(AppIndex::open_or_create(&app_dir.join("index"))?);
+        std::fs::create_dir_all(&app_dir)?;
         remove_stale_tmp(&app_dir);
 
         let (tx, rx) = mpsc::channel(10_000);
@@ -58,7 +56,6 @@ impl LocalBackend {
             seq: 0,
             nonce: rand::random(),
             failing: false,
-            index: Arc::clone(&index),
             cloud_syncer,
             sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             sync_tasks: Vec::new(),
@@ -74,7 +71,6 @@ impl LocalBackend {
 
         Ok(Self {
             sender: tx,
-            index,
             data_path,
             app,
         })
@@ -121,108 +117,117 @@ struct ChunkFlusher {
     /// Set after a failed flush: record arrivals stop triggering flushes until
     /// the next tick or explicit flush, so a broken disk is not hammered per record.
     failing: bool,
-    index: Arc<AppIndex>,
     cloud_syncer: Option<Arc<CloudSyncer>>,
     sync_lock: Arc<tokio::sync::Mutex<()>>,
     sync_tasks: Vec<tokio::task::JoinHandle<()>>,
     pending: Vec<LogRecord>,
 }
 
+struct WriteOutcome {
+    failed: Vec<LogRecord>,
+    first_err: Option<LogHavenError>,
+    wrote: bool,
+    seq: u32,
+}
+
+/// Chunk names sort chronologically and are never reused, even after an
+/// uploaded chunk is deleted locally or the daemon restarts. The nonce keeps
+/// names unique across restarts even if the clock steps back.
+fn chunk_name(nonce: u32, seq: u32) -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    format!("{:013}-{:08x}-{:05}.parquet", ms, nonce, seq)
+}
+
+/// Blocking disk work of one flush: groups records by the UTC date of their
+/// own timestamp and writes them as chunks of at most `chunk_records`.
+fn write_pending(
+    app_dir: PathBuf,
+    chunk_records: usize,
+    nonce: u32,
+    mut seq: u32,
+    records: Vec<LogRecord>,
+) -> WriteOutcome {
+    let mut by_date: BTreeMap<String, Vec<LogRecord>> = BTreeMap::new();
+    for record in records {
+        by_date
+            .entry(date_from_ms(record.timestamp_ms))
+            .or_default()
+            .push(record);
+    }
+
+    let mut out = WriteOutcome {
+        failed: Vec::new(),
+        first_err: None,
+        wrote: false,
+        seq,
+    };
+    for (date, records) in by_date {
+        let date_dir = app_dir.join(&date);
+        for chunk in records.chunks(chunk_records) {
+            seq = seq.wrapping_add(1);
+            match write_chunk(&date_dir.join(chunk_name(nonce, seq)), chunk) {
+                Ok(()) => out.wrote = true,
+                Err(e) => {
+                    out.failed.extend_from_slice(chunk);
+                    out.first_err.get_or_insert(e);
+                }
+            }
+        }
+    }
+    out.seq = seq;
+    out
+}
+
 impl ChunkFlusher {
-    fn push(&mut self, record: LogRecord) {
+    async fn push(&mut self, record: LogRecord) {
         self.pending.push(record);
         if self.pending.len() >= self.batch
             && !self.failing
-            && let Err(e) = self.flush()
+            && let Err(e) = self.flush().await
         {
             eprintln!("Storage flush error: {}", e);
         }
     }
 
-    /// Chunk names sort chronologically and are never reused, even after an
-    /// uploaded chunk is deleted locally or the daemon restarts.
-    fn next_chunk_name(&mut self) -> String {
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis());
-        self.seq = self.seq.wrapping_add(1);
-        // the nonce keeps names unique across restarts even if the clock steps back
-        format!("{:013}-{:08x}-{:05}.parquet", ms, self.nonce, self.seq)
-    }
-
-    /// Writes pending records grouped by the UTC date of their own timestamp.
     /// Records whose chunk could not be written stay pending for the next try.
-    fn flush(&mut self) -> Result<()> {
-        let result = self.flush_pending();
+    async fn flush(&mut self) -> Result<()> {
+        let result = self.flush_pending().await;
         self.failing = result.is_err();
         result
     }
 
-    fn flush_pending(&mut self) -> Result<()> {
+    async fn flush_pending(&mut self) -> Result<()> {
         if self.pending.is_empty() {
             return Ok(());
         }
 
-        let mut by_date: BTreeMap<String, Vec<LogRecord>> = BTreeMap::new();
-        for record in std::mem::take(&mut self.pending) {
-            by_date
-                .entry(date_from_ms(record.timestamp_ms))
-                .or_default()
-                .push(record);
-        }
+        let records = std::mem::take(&mut self.pending);
+        let (app_dir, chunk_records, nonce, seq) = (
+            self.app_dir.clone(),
+            self.chunk_records,
+            self.nonce,
+            self.seq,
+        );
+        // fsync and compression must not block the async worker threads
+        let out = tokio::task::spawn_blocking(move || {
+            write_pending(app_dir, chunk_records, nonce, seq, records)
+        })
+        .await
+        .map_err(|e| LogHavenError::Storage(format!("flush task failed: {e}")))?;
 
-        let mut first_err = None;
-        let mut failed: Vec<LogRecord> = Vec::new();
-        let mut wrote = false;
-
-        for (date, records) in by_date {
-            let date_dir = self.app_dir.join(&date);
-            for chunk in records.chunks(self.chunk_records) {
-                let path = date_dir.join(self.next_chunk_name());
-                match write_chunk(&path, chunk) {
-                    Ok(()) => {
-                        self.index_chunk(chunk);
-                        wrote = true;
-                    }
-                    Err(e) => {
-                        failed.extend_from_slice(chunk);
-                        first_err.get_or_insert(e);
-                    }
-                }
-            }
-        }
-
-        if let Err(e) = self.index.commit() {
-            eprintln!("Index commit error: {}", e);
-        }
-        if wrote {
+        self.seq = out.seq;
+        if out.wrote {
             self.trigger_sync();
         }
-
-        self.pending = failed;
+        self.pending = out.failed;
         let dropped = cap_pending(&mut self.pending, MAX_PENDING, MAX_PENDING_BYTES);
         if dropped > 0 {
             eprintln!("Storage: dropped {} oldest unwritable records", dropped);
         }
 
-        first_err.map_or(Ok(()), Err)
-    }
-
-    /// The Parquet chunk is the source of truth; an index failure never fails
-    /// the flush, but is reported with its size so it is not silent.
-    fn index_chunk(&self, records: &[LogRecord]) {
-        let failed = records
-            .iter()
-            .filter(|r| self.index.add_record(r).is_err())
-            .count();
-        if failed > 0 {
-            eprintln!(
-                "Index: {} of {} records in {} not indexed",
-                failed,
-                records.len(),
-                self.app_dir.display()
-            );
-        }
+        out.first_err.map_or(Ok(()), Err)
     }
 
     fn warn_if_unwritten(&self) {
@@ -295,26 +300,26 @@ async fn writer_task(
     loop {
         tokio::select! {
             cmd = rx.recv() => match cmd {
-                Some(WriteCommand::Record(r)) => flusher.push(*r),
+                Some(WriteCommand::Record(r)) => flusher.push(*r).await,
                 Some(WriteCommand::Flush(reply)) => {
-                    let _ = reply.send(flusher.flush());
+                    let _ = reply.send(flusher.flush().await);
                 }
                 Some(WriteCommand::Shutdown(reply)) => {
-                    let result = flusher.flush();
+                    let result = flusher.flush().await;
                     flusher.warn_if_unwritten();
                     flusher.finish_sync().await;
                     let _ = reply.send(result);
                     return;
                 }
                 None => {
-                    let _ = flusher.flush();
+                    let _ = flusher.flush().await;
                     flusher.warn_if_unwritten();
                     flusher.finish_sync().await;
                     return;
                 }
             },
             _ = ticker.tick() => {
-                if let Err(e) = flusher.flush() {
+                if let Err(e) = flusher.flush().await {
                     eprintln!("Storage flush error: {}", e);
                 }
             }
@@ -782,29 +787,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    #[tokio::test]
-    async fn chunk_names_differ_between_backends_started_in_the_same_millisecond() {
-        let mk = |tmp: &Path| ChunkFlusher {
-            app_dir: tmp.to_path_buf(),
-            chunk_records: 1,
-            batch: 1,
-            seq: 0,
-            nonce: rand::random(),
-            failing: false,
-            index: Arc::new(AppIndex::open_or_create(&tmp.join("index")).unwrap()),
-            cloud_syncer: None,
-            sync_lock: Arc::new(tokio::sync::Mutex::new(())),
-            sync_tasks: Vec::new(),
-            pending: Vec::new(),
-        };
-        let (_, tmp) = cfg("nonce", 1);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let mut a = mk(&tmp.join("a"));
-        let mut b = mk(&tmp.join("b"));
+    #[test]
+    fn chunk_names_differ_between_nonces_and_sequences() {
         let names: std::collections::HashSet<_> = (0..50)
-            .flat_map(|_| [a.next_chunk_name(), b.next_chunk_name()])
+            .flat_map(|i| [chunk_name(1, i), chunk_name(2, i)])
             .collect();
         assert_eq!(names.len(), 100);
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

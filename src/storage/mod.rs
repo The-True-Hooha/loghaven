@@ -1,7 +1,6 @@
 mod app_name;
 pub mod cloud;
 pub mod date;
-mod index;
 pub mod local;
 pub mod pruner;
 pub mod query;
