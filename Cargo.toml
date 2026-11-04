@@ -18,22 +18,21 @@ nix = { version = "0.30", features = ["process", "signal"] }
 parquet = { version = "59", features = ["arrow", "zstd"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tantivy = "0.22"
 thiserror = "2"
 tokio = { version = "1", features = ["full", "net", "rt-multi-thread", "sync"] }
 toml = "0.9"
 uuid = { version = "1", features = ["v7"] }
 jsonwebtoken = "9"
-ring = "0.17"
-base64 = "0.22"
 rand = "0.8"
 hmac = "0.12"
 sha2 = "0.10"
 rsa = { version = "0.9", features = ["pem"] }
 hex = "0.4"
 axum = "0.8"
-tower = "0.5"
 reqwest = { version = "0.12", features = ["json"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 strip = true

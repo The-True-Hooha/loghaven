@@ -73,6 +73,11 @@ pub struct StorageConfig {
 
     pub secondary: Option<String>,
 
+    /// Remove a chunk from local disk once it is uploaded. Queries only read
+    /// local chunks, so deleted chunks are no longer searchable.
+    #[serde(default)]
+    pub delete_after_upload: bool,
+
     #[serde(default)]
     pub local: LocalStorageConfig,
 
@@ -86,18 +91,23 @@ pub struct LocalStorageConfig {
     #[serde(default = "defaults::local_storage_path")]
     pub path: PathBuf,
 
+    /// Oldest day directories are removed when local data exceeds this. 0 = no limit.
     #[serde(default = "defaults::max_size_gb")]
     pub max_size_gb: u64,
 
+    /// Ignored: chunks are written whole on every flush. Kept so existing
+    /// config files still parse.
     #[serde(default = "defaults::rotate_size_mb")]
     pub rotate_size_mb: u64,
 
+    /// Maximum records per chunk file.
     #[serde(default = "defaults::rotate_records")]
     pub rotate_records: u64,
 
     #[serde(default = "defaults::flush_interval_secs")]
     pub flush_interval_secs: u64,
 
+    /// Day directories older than this are removed. 0 = keep forever.
     #[serde(default = "defaults::retention_days")]
     pub retention_days: u32,
 }
@@ -188,6 +198,7 @@ impl Default for StorageConfig {
             backend: defaults::storage_backend(),
             primary: "local".to_string(),
             secondary: None,
+            delete_after_upload: false,
             local: LocalStorageConfig::default(),
             s3: None,
             r2: None,
@@ -278,10 +289,56 @@ pub fn get_config_path(profile: Option<&str>) -> PathBuf {
     let config_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("loghaven");
+    config_path_in(&config_dir, profile)
+}
 
+/// Renames a legacy `config_toml` to `config.toml` when only the legacy file
+/// exists. Returns the new path if it migrated.
+pub fn migrate_legacy_config() -> Result<Option<PathBuf>> {
+    let dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("loghaven");
+    migrate_legacy_in(&dir)
+}
+
+fn migrate_legacy_in(dir: &std::path::Path) -> Result<Option<PathBuf>> {
+    let (new, legacy) = (dir.join("config.toml"), dir.join("config_toml"));
+    if !legacy.exists() {
+        return Ok(None);
+    }
+    if new.exists() {
+        eprintln!(
+            "Warning: both {} and {} exist; {} is used and the old file is ignored",
+            new.display(),
+            legacy.display(),
+            new.display()
+        );
+        return Ok(None);
+    }
+    std::fs::rename(&legacy, &new).map_err(|e| {
+        LogHavenError::Config(format!(
+            "cannot rename {} to {}: {}",
+            legacy.display(),
+            new.display(),
+            e
+        ))
+    })?;
+    Ok(Some(new))
+}
+
+fn config_path_in(config_dir: &std::path::Path, profile: Option<&str>) -> PathBuf {
     match profile {
         Some(p) => config_dir.join(format!("{}.toml", p)),
-        None => config_dir.join("config_toml"),
+        None => {
+            let path = config_dir.join("config.toml");
+            // earlier versions wrote "config_toml" by mistake
+            let legacy = config_dir.join("config_toml");
+            if !path.exists() && legacy.exists() {
+                legacy
+            } else {
+                path
+            }
+        }
     }
 }
 
@@ -293,5 +350,40 @@ pub fn default_config() -> Config {
         storage: StorageConfig::default(),
         chains: ChainsConfig::default(),
         auth: AuthConfig::default(),
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn default_name_and_legacy_fallback() {
+        let dir = std::env::temp_dir().join(format!("lh-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(config_path_in(&dir, None), dir.join("config.toml"));
+        assert_eq!(config_path_in(&dir, Some("dev")), dir.join("dev.toml"));
+        std::fs::write(dir.join("config_toml"), "").unwrap();
+        assert_eq!(config_path_in(&dir, None), dir.join("config_toml"));
+        assert_eq!(
+            migrate_legacy_in(&dir).unwrap(),
+            Some(dir.join("config.toml"))
+        );
+        assert!(!dir.join("config_toml").exists());
+        assert_eq!(config_path_in(&dir, None), dir.join("config.toml"));
+        assert_eq!(
+            migrate_legacy_in(&dir).unwrap(),
+            None,
+            "nothing left to migrate"
+        );
+        std::fs::write(dir.join("config_toml"), "other").unwrap();
+        assert_eq!(
+            migrate_legacy_in(&dir).unwrap(),
+            None,
+            "never overwrites config.toml"
+        );
+        assert!(dir.join("config_toml").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,6 +1,8 @@
 pub mod keys;
 pub mod session;
 pub mod token;
+#[cfg(test)]
+mod tests;
 
 #[allow(unused_imports)]
 pub use keys::{generate_keypair, load_private_key, load_public_key};

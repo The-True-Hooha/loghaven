@@ -15,6 +15,8 @@ pub fn verify_jwt(token: &str, public_key_pem: &str) -> Result<Claims> {
 
     let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_exp = true;
+    // the default 60s leeway would keep an expired JWT usable for another minute
+    validation.leeway = 0;
 
     let data = decode::<Claims>(token, &key, &validation)
         .map_err(|e| LogHavenError::Config(format!("JWT verify failed: {}", e)))?;

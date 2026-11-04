@@ -4,52 +4,66 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use std::fs::{File, create_dir_all};
-use std::path::PathBuf;
+use std::path::Path;
 
-pub struct ChunkWriter {
-    writer: ArrowWriter<File>,
-    pub path: PathBuf,
-    pub record_count: u64,
+const TMP_SUFFIX: &str = "parquet.tmp";
+
+fn storage_err(e: impl std::fmt::Display) -> LogHavenError {
+    LogHavenError::Storage(e.to_string())
 }
 
-impl ChunkWriter {
-    pub fn new(path: PathBuf) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            create_dir_all(parent)?;
+/// Writes `records` as one complete Parquet file at `path`.
+/// The file is built under a `.parquet.tmp` name, synced, then renamed, so a
+/// reader or a crash never sees a partial `.parquet` file.
+pub fn write_chunk(path: &Path, records: &[LogRecord]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(TMP_SUFFIX);
+
+    let result =
+        write_tmp(&tmp, records).and_then(|()| std::fs::rename(&tmp, path).map_err(Into::into));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return result;
+    }
+    // make the rename itself durable; directories cannot be opened on every platform
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+fn write_tmp(tmp: &Path, records: &[LogRecord]) -> Result<()> {
+    let file = File::create(tmp)?;
+    let props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(Default::default()))
+        .build();
+    let mut writer = ArrowWriter::try_new(file, log_schema(), Some(props)).map_err(storage_err)?;
+    writer
+        .write(&records_to_batch(records)?)
+        .map_err(storage_err)?;
+    let file = writer.into_inner().map_err(storage_err)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Removes `.parquet.tmp` leftovers (from a crash mid-write) in every date
+/// directory of an app.
+pub fn remove_stale_tmp(app_dir: &Path) {
+    let Ok(dates) = std::fs::read_dir(app_dir) else {
+        return;
+    };
+    for date in dates.flatten() {
+        let Ok(files) = std::fs::read_dir(date.path()) else {
+            continue;
+        };
+        for f in files.flatten() {
+            if f.file_name().to_string_lossy().ends_with(TMP_SUFFIX) {
+                let _ = std::fs::remove_file(f.path());
+            }
         }
-        let file = File::create(&path)?;
-        let props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(Default::default()))
-            .build();
-        let writer = ArrowWriter::try_new(file, log_schema(), Some(props))
-            .map_err(|e| LogHavenError::Storage(e.to_string()))?;
-        Ok(Self {
-            writer,
-            path,
-            record_count: 0,
-        })
-    }
-
-    pub fn write_batch(&mut self, records: &[LogRecord]) -> Result<()> {
-        if records.is_empty() {
-            return Ok(());
-        }
-        let batch = records_to_batch(records)?;
-        self.writer
-            .write(&batch)
-            .map_err(|e| LogHavenError::Storage(e.to_string()))?;
-        self.record_count += records.len() as u64;
-        Ok(())
-    }
-
-    pub fn finish(self) -> Result<()> {
-        self.writer
-            .close()
-            .map_err(|e| LogHavenError::Storage(e.to_string()))?;
-        Ok(())
-    }
-
-    pub fn size_bytes(&self) -> u64 {
-        std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
     }
 }
