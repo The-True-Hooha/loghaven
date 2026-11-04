@@ -85,7 +85,7 @@ Steps 0-8 implemented. Pruner additionally skips day directories with unsynced c
 
 Follow-ups done: chunk writes run in `spawn_blocking`; the write-only tantivy index was removed; queries skip row groups whose `timestamp_ms` statistics fall outside the range; `init` renames a legacy `config_toml`; the PID file is claimed with `create_new`.
 
-Known limit: a query still decodes all columns of every row group it reads (no column projection).
+Known limit: a query decodes all columns of the row groups it reads, but only builds records for rows that match.
 
 ## Out of scope
 Chain adapters, TUI/dashboard, multi-backend `primary`/`secondary`, client-side encryption, persistent sessions.

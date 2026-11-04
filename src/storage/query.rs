@@ -67,7 +67,7 @@ pub fn query(data_path: &Path, filter: &QueryFilter) -> Result<Vec<LogRecord>> {
             break;
         }
         for chunk_path in chunk_files(date_dir)? {
-            let records = match read_parquet_file(&chunk_path, filter.from_ms, filter.to_ms) {
+            let records = match read_parquet_file(&chunk_path, filter, text_lc.as_deref()) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!(
@@ -78,11 +78,7 @@ pub fn query(data_path: &Path, filter: &QueryFilter) -> Result<Vec<LogRecord>> {
                     continue;
                 }
             };
-            results.extend(
-                records
-                    .into_iter()
-                    .filter(|r| matches_filter(r, filter, text_lc.as_deref())),
-            );
+            results.extend(records);
             trim_newest(&mut results, filter.limit, false);
         }
     }
@@ -209,11 +205,15 @@ fn overlapping_row_groups(
         .collect()
 }
 
+/// Reads the records of one chunk that match `filter`. Rows are checked
+/// against the column arrays first, so non-matching rows never allocate a
+/// `LogRecord`.
 fn read_parquet_file(
     path: &Path,
-    from_ms: Option<i64>,
-    to_ms: Option<i64>,
+    filter: &QueryFilter,
+    text_lc: Option<&str>,
 ) -> Result<Vec<LogRecord>> {
+    let (from_ms, to_ms) = (filter.from_ms, filter.to_ms);
     let file = File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| LogHavenError::Storage(e.to_string()))?;
@@ -252,6 +252,33 @@ fn read_parquet_file(
             if tss.is_null(row) {
                 continue; // a record without a time cannot be placed or ordered
             }
+            let ts = tss.value(row);
+            if from_ms.is_some_and(|f| ts < f) || to_ms.is_some_and(|t| ts > t) {
+                continue;
+            }
+            let eq = |a: &StringArray, want: &Option<String>| {
+                want.as_ref()
+                    .is_none_or(|w| !a.is_null(row) && a.value(row) == w)
+            };
+            // an absent value never equals the wanted one, but a wanted "" matches it
+            let eq_or_empty = |a: &StringArray, want: &Option<String>| {
+                eq(a, want) || want.as_deref() == Some("") && a.is_null(row)
+            };
+            if !eq_or_empty(sources, &filter.source) || !eq_or_empty(levels, &filter.level) {
+                continue;
+            }
+            if let Some(needle) = text_lc {
+                let in_str = |a: Option<&StringArray>| {
+                    a.is_some_and(|a| {
+                        !a.is_null(row) && a.value(row).to_lowercase().contains(needle)
+                    })
+                };
+                let in_msg =
+                    !messages.is_null(row) && messages.value(row).to_lowercase().contains(needle);
+                if !(in_msg || in_str(tags) || in_str(metadata)) {
+                    continue;
+                }
+            }
             let non_empty = |a| str_at(a, row).filter(|s| !s.is_empty());
             records.push(LogRecord {
                 id: str_at(Some(ids), row).unwrap_or_default(),
@@ -275,36 +302,6 @@ fn read_parquet_file(
     }
 
     Ok(records)
-}
-
-fn matches_filter(record: &LogRecord, filter: &QueryFilter, text_lc: Option<&str>) -> bool {
-    if filter.source.as_ref().is_some_and(|s| &record.source != s) {
-        return false;
-    }
-    if filter.level.as_ref().is_some_and(|l| &record.level != l) {
-        return false;
-    }
-    if filter.from_ms.is_some_and(|f| record.timestamp_ms < f) {
-        return false;
-    }
-    if filter.to_ms.is_some_and(|t| record.timestamp_ms > t) {
-        return false;
-    }
-    if let Some(needle) = text_lc {
-        let hit = record.message.to_lowercase().contains(needle)
-            || record
-                .tags
-                .as_ref()
-                .is_some_and(|t| t.to_lowercase().contains(needle))
-            || record
-                .metadata
-                .as_ref()
-                .is_some_and(|m| m.to_lowercase().contains(needle));
-        if !hit {
-            return false;
-        }
-    }
-    true
 }
 
 #[cfg(test)]
@@ -664,14 +661,29 @@ mod tests {
         assert!(meta(Some(T0 + 11), None).is_empty());
         assert!(meta(None, Some(T0 - 1)).is_empty());
         assert!(
-            read_parquet_file(&path, Some(T0 + 11), None)
-                .unwrap()
-                .is_empty()
+            read_parquet_file(
+                &path,
+                &QueryFilter {
+                    from_ms: Some(T0 + 11),
+                    ..filter()
+                },
+                None
+            )
+            .unwrap()
+            .is_empty()
         );
         assert_eq!(
-            read_parquet_file(&path, Some(T0), Some(T0 + 10))
-                .unwrap()
-                .len(),
+            read_parquet_file(
+                &path,
+                &QueryFilter {
+                    from_ms: Some(T0),
+                    to_ms: Some(T0 + 10),
+                    ..filter()
+                },
+                None
+            )
+            .unwrap()
+            .len(),
             2
         );
     }
