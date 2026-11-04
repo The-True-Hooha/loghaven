@@ -40,6 +40,7 @@ impl LocalBackend {
         config: &LocalStorageConfig,
         cloud_syncer: Option<Arc<CloudSyncer>>,
     ) -> Result<Self> {
+        crate::storage::validate_app_name(&app)?;
         let data_path = config.path.clone();
         let index_path = data_path.join(&app).join("index");
         let index = Arc::new(AppIndex::open_or_create(&index_path)?);
@@ -297,4 +298,23 @@ fn date_from_epoch_secs(secs: u64) -> String {
     };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn backend_rejects_traversal_app() {
+        let tmp = std::env::temp_dir().join(format!("lh-l-{}", std::process::id()));
+        let cfg = LocalStorageConfig {
+            path: tmp.clone(),
+            ..Default::default()
+        };
+        for app in ["../evil", "..", "a/b", ""] {
+            assert!(LocalBackend::new(app.into(), &cfg).is_err(), "{app:?}");
+        }
+        assert!(!tmp.exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

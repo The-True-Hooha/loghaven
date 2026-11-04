@@ -48,6 +48,7 @@ pub fn query(
 }
 
 fn scan_parquet(data_path: &std::path::Path, filter: &QueryFilter) -> Result<Vec<LogRecord>> {
+    crate::storage::validate_app_name(&filter.app)?;
     let app_dir = data_path.join(&filter.app);
     if !app_dir.exists() {
         return Ok(vec![]);
@@ -297,4 +298,28 @@ fn ms_to_date_str(ms: i64) -> String {
     };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_rejects_traversal_app() {
+        let tmp = std::env::temp_dir().join(format!("lh-q-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("victim")).unwrap();
+        for app in ["../victim", "..", "a/b", ""] {
+            let f = QueryFilter {
+                app: app.into(),
+                ..Default::default()
+            };
+            assert!(query(&tmp, &f, None).is_err(), "{app:?}");
+        }
+        let ok = QueryFilter {
+            app: "missing".into(),
+            ..Default::default()
+        };
+        assert!(query(&tmp, &ok, None).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

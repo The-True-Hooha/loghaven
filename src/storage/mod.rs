@@ -1,3 +1,4 @@
+mod app_name;
 pub mod cloud;
 mod index;
 pub mod local;
@@ -6,6 +7,7 @@ pub mod query;
 pub mod record;
 mod writer;
 
+pub use app_name::validate_app_name;
 pub use local::LocalBackend;
 pub use record::LogRecord;
 
@@ -37,6 +39,7 @@ impl StorageRouter {
     }
 
     pub async fn write(&self, app: &str, record: LogRecord) -> Result<()> {
+        validate_app_name(app)?;
         let backend = self.get_or_create(app)?;
         backend.write(record).await
     }
@@ -185,4 +188,25 @@ fn auto_detect_syncer(
 fn required_key(val: &Option<String>, field: &str) -> Result<String> {
     val.clone()
         .ok_or_else(|| LogHavenError::Config(format!("missing required field: {}", field)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn router_rejects_invalid_app_without_creating_dirs() {
+        let tmp = std::env::temp_dir().join(format!("lh-r-{}", std::process::id()));
+        let mut cfg = crate::config::default_config();
+        cfg.storage.backend = "local".into();
+        cfg.storage.local.path = tmp.clone();
+        let router = StorageRouter::new(&cfg).unwrap();
+        for app in ["../evil", "..", "a/b", "", "Web"] {
+            let r = router
+                .write(app, LogRecord::new(app, "info", "t", "m"))
+                .await;
+            assert!(matches!(r, Err(LogHavenError::InvalidApp(_))), "{app:?}");
+        }
+        assert!(!tmp.exists());
+    }
 }

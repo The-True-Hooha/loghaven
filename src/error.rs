@@ -15,6 +15,9 @@ pub enum LogHavenError {
     #[error("TOML serialization error: {0}")]
     TomlSerialize(#[from] toml::ser::Error),
 
+    #[error("invalid app name: {0}")]
+    InvalidApp(&'static str),
+
     #[error("storage error: {0}")]
     Storage(String),
 

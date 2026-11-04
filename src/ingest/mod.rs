@@ -88,8 +88,8 @@ async fn handle_datagram(
         }
     };
 
-    if payload.app.is_empty() {
-        eprintln!("Ingest: payload missing app field");
+    if let Err(e) = crate::storage::validate_app_name(&payload.app) {
+        eprintln!("Ingest: invalid app: {}", e);
         return;
     }
 

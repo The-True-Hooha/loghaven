@@ -91,8 +91,8 @@ pub async fn get_logs(
             .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
     }
 
-    if params.app.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "app param required".into()));
+    if let Err(e) = crate::storage::validate_app_name(&params.app) {
+        return Err((StatusCode::BAD_REQUEST, format!("invalid app: {}", e)));
     }
 
     let filter = QueryFilter {
@@ -109,10 +109,57 @@ pub async fn get_logs(
     let records = tokio::task::spawn_blocking(move || query(&data_path, &filter, None))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| match e {
+            crate::error::LogHavenError::InvalidApp(_) => (StatusCode::BAD_REQUEST, e.to_string()),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
 
     Ok(Json(LogsResponse {
         count: records.len(),
         records,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::session::SessionStore;
+    use std::sync::Arc;
+
+    fn state() -> QueryState {
+        QueryState {
+            sessions: Arc::new(SessionStore::new(60)),
+            public_key_pem: None,
+            data_path: std::env::temp_dir().join(format!("lh-h-{}", std::process::id())),
+            require_auth: false,
+        }
+    }
+
+    fn params(app: &str) -> LogsParams {
+        LogsParams {
+            app: app.into(),
+            level: None,
+            source: None,
+            from_ms: None,
+            to_ms: None,
+            text: None,
+            limit: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn logs_rejects_invalid_app_with_400() {
+        for app in ["../etc", "", "a/b", "Web"] {
+            let r = get_logs(State(state()), HeaderMap::new(), Query(params(app))).await;
+            assert_eq!(r.err().unwrap().0, StatusCode::BAD_REQUEST, "{app:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn logs_unknown_valid_app_is_empty_200() {
+        let r = get_logs(State(state()), HeaderMap::new(), Query(params("nope")))
+            .await
+            .unwrap();
+        assert_eq!(r.0.count, 0);
+    }
 }
