@@ -15,6 +15,7 @@ const MAX_BATCH: usize = 10_000;
 /// Upper bound on records held in memory while chunk writes keep failing.
 const MAX_PENDING: usize = 100_000;
 const MAX_PENDING_BYTES: usize = 256 * 1024 * 1024;
+const SHUTDOWN_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 
 enum WriteCommand {
     Record(Box<LogRecord>),
@@ -50,16 +51,21 @@ impl LocalBackend {
         let chunk_records = usize::try_from(config.rotate_records)
             .unwrap_or(usize::MAX)
             .max(1);
-        let writer = ChunkFlusher {
+        let mut writer = ChunkFlusher {
             app_dir,
             chunk_records,
             batch: chunk_records.min(MAX_BATCH),
             seq: 0,
+            nonce: rand::random(),
             failing: false,
             index: Arc::clone(&index),
             cloud_syncer,
+            sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            sync_tasks: Vec::new(),
             pending: Vec::new(),
         };
+        // chunks left over from a previous run (failed or interrupted uploads)
+        writer.trigger_sync();
         tokio::spawn(writer_task(
             writer,
             rx,
@@ -111,11 +117,14 @@ struct ChunkFlusher {
     chunk_records: usize,
     batch: usize,
     seq: u32,
+    nonce: u32,
     /// Set after a failed flush: record arrivals stop triggering flushes until
     /// the next tick or explicit flush, so a broken disk is not hammered per record.
     failing: bool,
     index: Arc<AppIndex>,
     cloud_syncer: Option<Arc<CloudSyncer>>,
+    sync_lock: Arc<tokio::sync::Mutex<()>>,
+    sync_tasks: Vec<tokio::task::JoinHandle<()>>,
     pending: Vec<LogRecord>,
 }
 
@@ -137,7 +146,8 @@ impl ChunkFlusher {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
         self.seq = self.seq.wrapping_add(1);
-        format!("{:013}-{:05}.parquet", ms, self.seq)
+        // the nonce keeps names unique across restarts even if the clock steps back
+        format!("{:013}-{:08x}-{:05}.parquet", ms, self.nonce, self.seq)
     }
 
     /// Writes pending records grouped by the UTC date of their own timestamp.
@@ -163,6 +173,7 @@ impl ChunkFlusher {
 
         let mut first_err = None;
         let mut failed: Vec<LogRecord> = Vec::new();
+        let mut wrote = false;
 
         for (date, records) in by_date {
             let date_dir = self.app_dir.join(&date);
@@ -171,7 +182,7 @@ impl ChunkFlusher {
                 match write_chunk(&path, chunk) {
                     Ok(()) => {
                         self.index_chunk(chunk);
-                        self.upload(path);
+                        wrote = true;
                     }
                     Err(e) => {
                         failed.extend_from_slice(chunk);
@@ -183,6 +194,9 @@ impl ChunkFlusher {
 
         if let Err(e) = self.index.commit() {
             eprintln!("Index commit error: {}", e);
+        }
+        if wrote {
+            self.trigger_sync();
         }
 
         self.pending = failed;
@@ -221,14 +235,51 @@ impl ChunkFlusher {
         }
     }
 
-    fn upload(&self, path: PathBuf) {
-        if let Some(syncer) = &self.cloud_syncer {
-            let syncer = Arc::clone(syncer);
-            tokio::spawn(async move {
-                if let Err(e) = syncer.upload_chunk(&path).await {
-                    eprintln!("Cloud sync error: {}", e);
+    /// Starts a background upload of every unsynced chunk of this app. Runs are
+    /// serialized, and at most one is queued behind the running one because a
+    /// queued run rescans the disk anyway.
+    fn trigger_sync(&mut self) {
+        let Some(syncer) = &self.cloud_syncer else {
+            return;
+        };
+        self.sync_tasks.retain(|h| !h.is_finished());
+        if self.sync_tasks.len() >= 2 {
+            return;
+        }
+        let syncer = Arc::clone(syncer);
+        let lock = Arc::clone(&self.sync_lock);
+        let app_dir = self.app_dir.clone();
+        self.sync_tasks.push(tokio::spawn(async move {
+            let _serial = lock.lock().await;
+            syncer.sync_app(&app_dir).await;
+        }));
+    }
+
+    /// Waits for running uploads, then uploads whatever is still unsynced.
+    async fn finish_sync(&mut self) {
+        let Some(syncer) = self.cloud_syncer.clone() else {
+            return;
+        };
+        let app_dir = self.app_dir.clone();
+        let lock = Arc::clone(&self.sync_lock);
+        let handles = std::mem::take(&mut self.sync_tasks);
+        let work = async {
+            for h in handles {
+                if let Err(e) = h.await {
+                    eprintln!("Cloud sync task failed: {}", e);
                 }
-            });
+            }
+            let _serial = lock.lock().await;
+            syncer.sync_app(&app_dir).await;
+        };
+        if tokio::time::timeout(SHUTDOWN_SYNC_TIMEOUT, work)
+            .await
+            .is_err()
+        {
+            eprintln!(
+                "Cloud sync for {} timed out at shutdown; chunks will upload on next start",
+                app_dir.display()
+            );
         }
     }
 }
@@ -251,12 +302,14 @@ async fn writer_task(
                 Some(WriteCommand::Shutdown(reply)) => {
                     let result = flusher.flush();
                     flusher.warn_if_unwritten();
+                    flusher.finish_sync().await;
                     let _ = reply.send(result);
                     return;
                 }
                 None => {
                     let _ = flusher.flush();
                     flusher.warn_if_unwritten();
+                    flusher.finish_sync().await;
                     return;
                 }
             },
@@ -617,6 +670,141 @@ mod tests {
         assert!(!tmp.join("web").join(date_from_ms(ts)).exists());
         b.flush().await.unwrap();
         assert_eq!(read_all(&tmp, "web").len(), 5);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn cfg_with_syncer(
+        name: &str,
+        delete: bool,
+        delay_ms: u64,
+    ) -> (
+        LocalStorageConfig,
+        PathBuf,
+        Arc<CloudSyncer>,
+        Arc<crate::storage::cloud::testing::MockStore>,
+    ) {
+        let (cfg, tmp) = cfg(name, 100);
+        let store = Arc::new(crate::storage::cloud::testing::MockStore {
+            delay_ms,
+            ..Default::default()
+        });
+        let syncer = CloudSyncer::with_store(Box::new(store.clone()), None, tmp.clone(), delete);
+        (cfg, tmp, syncer, store)
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_uploads() {
+        let (cfg, tmp, syncer, store) = cfg_with_syncer("sd-up", false, 150);
+        let b = LocalBackend::new_with_syncer("web".into(), &cfg, Some(syncer)).unwrap();
+        b.write(rec("web", 1_700_000_000_000, "a")).await.unwrap();
+        b.shutdown().await.unwrap();
+        assert_eq!(
+            store.puts.lock().unwrap().len(),
+            1,
+            "upload finished before shutdown returned"
+        );
+        assert_eq!(chunks_in(&day_dir(&tmp, "web", 1_700_000_000_000)), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn leftover_chunks_are_uploaded_on_start() {
+        let (cfg, tmp, syncer, store) = cfg_with_syncer("left", false, 0);
+        {
+            let b = LocalBackend::new("web".into(), &cfg).unwrap();
+            b.write(rec("web", 1_700_000_000_000, "a")).await.unwrap();
+            b.shutdown().await.unwrap();
+        }
+        assert!(store.puts.lock().unwrap().is_empty());
+        let b = LocalBackend::new_with_syncer("web".into(), &cfg, Some(syncer)).unwrap();
+        b.shutdown().await.unwrap();
+        assert_eq!(store.puts.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn failed_uploads_are_retried_and_chunks_kept_meanwhile() {
+        let (cfg, tmp, syncer, store) = cfg_with_syncer("retry", true, 0);
+        store
+            .fail_all
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let b = LocalBackend::new_with_syncer("web".into(), &cfg, Some(syncer)).unwrap();
+        let ts = 1_700_000_000_000;
+        for i in 0..2 {
+            b.write(rec("web", ts + i, "m")).await.unwrap();
+            b.flush().await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            parquet_files(&tmp, "web").len(),
+            2,
+            "kept while uploads fail"
+        );
+        assert_eq!(read_all(&tmp, "web").len(), 2);
+
+        store
+            .fail_all
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        b.shutdown().await.unwrap();
+        assert!(
+            parquet_files(&tmp, "web").is_empty(),
+            "uploaded then deleted"
+        );
+        assert_eq!(store.puts.lock().unwrap().len(), 2);
+        assert_eq!(
+            read_all(&tmp, "web").len(),
+            0,
+            "deleted chunks are not queryable"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn every_chunk_is_uploaded_despite_rapid_flushes_and_slow_store() {
+        let (cfg, tmp, syncer, store) = cfg_with_syncer("rapid", false, 40);
+        let b = LocalBackend::new_with_syncer("web".into(), &cfg, Some(syncer)).unwrap();
+        for i in 0..8 {
+            b.write(rec("web", 1_700_000_000_000 + i, "m"))
+                .await
+                .unwrap();
+            b.flush().await.unwrap();
+        }
+        b.shutdown().await.unwrap();
+        let mut puts = store.puts.lock().unwrap().clone();
+        puts.sort();
+        puts.dedup();
+        assert_eq!(puts.len(), 8, "each chunk uploaded");
+        assert_eq!(
+            parquet_files(&tmp, "web").len(),
+            8 * 2,
+            "chunk + marker per upload"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn chunk_names_differ_between_backends_started_in_the_same_millisecond() {
+        let mk = |tmp: &Path| ChunkFlusher {
+            app_dir: tmp.to_path_buf(),
+            chunk_records: 1,
+            batch: 1,
+            seq: 0,
+            nonce: rand::random(),
+            failing: false,
+            index: Arc::new(AppIndex::open_or_create(&tmp.join("index")).unwrap()),
+            cloud_syncer: None,
+            sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            sync_tasks: Vec::new(),
+            pending: Vec::new(),
+        };
+        let (_, tmp) = cfg("nonce", 1);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut a = mk(&tmp.join("a"));
+        let mut b = mk(&tmp.join("b"));
+        let names: std::collections::HashSet<_> = (0..50)
+            .flat_map(|_| [a.next_chunk_name(), b.next_chunk_name()])
+            .collect();
+        assert_eq!(names.len(), 100);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

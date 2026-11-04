@@ -73,6 +73,11 @@ pub struct StorageConfig {
 
     pub secondary: Option<String>,
 
+    /// Remove a chunk from local disk once it is uploaded. Queries only read
+    /// local chunks, so deleted chunks are no longer searchable.
+    #[serde(default)]
+    pub delete_after_upload: bool,
+
     #[serde(default)]
     pub local: LocalStorageConfig,
 
@@ -191,6 +196,7 @@ impl Default for StorageConfig {
             backend: defaults::storage_backend(),
             primary: "local".to_string(),
             secondary: None,
+            delete_after_upload: false,
             local: LocalStorageConfig::default(),
             s3: None,
             r2: None,

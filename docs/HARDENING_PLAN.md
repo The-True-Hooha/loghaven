@@ -64,6 +64,7 @@ Tests: text match and miss, ordering, limit, filters, corrupt file skipped, open
 ## Step 5 - Cloud sync safety
 Problems: `delete_after_upload` hardcoded true makes uploaded data unqueryable; uploads are fire-and-forget and lost on shutdown; failed upload is never retried.
 Change: `storage.delete_after_upload` config (default false), uploads tracked and awaited on shutdown, failed uploads retried on next flush/startup (scan for chunks without a `.synced` marker).
+Notes: with `delete_after_upload=false` chunks stay on local disk until the pruner removes them (retention/size limit); turning the flag on later does not delete chunks already marked synced. Uploads have a 120 s timeout; shutdown waits for uploads of all apps concurrently (30 s cap). Chunk names carry a per-process random nonce so a clock step cannot reuse a name.
 Tests: key construction, marker logic, delete flag (upload itself behind a trait so tests need no network).
 
 ## Step 6 - Pruner safety

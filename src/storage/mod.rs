@@ -62,11 +62,16 @@ impl StorageRouter {
     pub async fn shutdown_all(&self) -> Result<()> {
         let backends: Vec<Arc<LocalBackend>> =
             { self.backends.lock().unwrap().values().cloned().collect() };
+        // concurrently, so a slow cloud sync of one app does not multiply the wait
+        let mut set = tokio::task::JoinSet::new();
         for b in backends {
-            if let Err(e) = b.shutdown().await {
-                eprintln!("Storage shutdown error ({}): {}", b.app, e);
-            }
+            set.spawn(async move {
+                if let Err(e) = b.shutdown().await {
+                    eprintln!("Storage shutdown error ({}): {}", b.app, e);
+                }
+            });
         }
+        while set.join_next().await.is_some() {}
         Ok(())
     }
 }
@@ -91,7 +96,7 @@ fn resolve_syncer(config: &Config) -> Result<Option<std::sync::Arc<CloudSyncer>>
                 key,
                 secret,
                 data_path,
-                true,
+                config.storage.delete_after_upload,
             )))
         }
 
@@ -108,7 +113,7 @@ fn resolve_syncer(config: &Config) -> Result<Option<std::sync::Arc<CloudSyncer>>
                 key,
                 secret,
                 data_path,
-                true,
+                config.storage.delete_after_upload,
             )))
         }
 
@@ -122,7 +127,7 @@ fn resolve_syncer(config: &Config) -> Result<Option<std::sync::Arc<CloudSyncer>>
                 m.access_key.clone(),
                 m.secret_key.clone(),
                 data_path,
-                true,
+                config.storage.delete_after_upload,
             )))
         }
 
@@ -150,7 +155,7 @@ fn auto_detect_syncer(
             key.clone(),
             secret.clone(),
             data_path,
-            true,
+            config.storage.delete_after_upload,
         ));
     }
 
@@ -165,7 +170,7 @@ fn auto_detect_syncer(
             key.clone(),
             secret.clone(),
             data_path,
-            true,
+            config.storage.delete_after_upload,
         ));
     }
 
@@ -180,7 +185,7 @@ fn auto_detect_syncer(
             m.access_key.clone(),
             m.secret_key.clone(),
             data_path,
-            true,
+            config.storage.delete_after_upload,
         ));
     }
 
@@ -211,5 +216,70 @@ mod tests {
             assert!(matches!(r, Err(LogHavenError::InvalidApp(_))), "{app:?}");
         }
         assert!(!tmp.exists());
+    }
+
+    fn s3_config(delete: Option<bool>) -> Config {
+        let mut cfg = crate::config::default_config();
+        cfg.storage.backend = "s3".into();
+        cfg.storage.s3 = Some(crate::config::S3StorageConfig {
+            bucket: "b".into(),
+            region: "us-east-1".into(),
+            prefix: None,
+            access_key: Some("k".into()),
+            secret_key: Some("s".into()),
+        });
+        if let Some(d) = delete {
+            cfg.storage.delete_after_upload = d;
+        }
+        cfg
+    }
+
+    #[test]
+    fn delete_after_upload_defaults_off_and_is_honoured_for_every_backend() {
+        assert!(!crate::config::default_config().storage.delete_after_upload);
+        let parsed: Config = toml::from_str("[storage]\nbackend = \"local\"\n").unwrap();
+        assert!(!parsed.storage.delete_after_upload);
+
+        for delete in [false, true] {
+            let syncer = resolve_syncer(&s3_config(Some(delete))).unwrap().unwrap();
+            assert_eq!(syncer.delete_after_upload, delete);
+
+            let mut auto = s3_config(Some(delete));
+            auto.storage.backend = "auto".into();
+            let syncer = resolve_syncer(&auto).unwrap().unwrap();
+            assert_eq!(syncer.delete_after_upload, delete);
+
+            let mut r2 = crate::config::default_config();
+            r2.storage.backend = "r2".into();
+            r2.storage.delete_after_upload = delete;
+            r2.storage.r2 = Some(crate::config::R2StorageConfig {
+                account_id: "a".into(),
+                bucket: "b".into(),
+                prefix: None,
+                access_key: Some("k".into()),
+                secret_key: Some("s".into()),
+            });
+            assert_eq!(
+                resolve_syncer(&r2).unwrap().unwrap().delete_after_upload,
+                delete
+            );
+
+            let mut minio = crate::config::default_config();
+            minio.storage.backend = "minio".into();
+            minio.storage.delete_after_upload = delete;
+            minio.storage.minio = Some(crate::config::MinioStorageConfig {
+                endpoint: "http://localhost:9000".into(),
+                bucket: "b".into(),
+                access_key: "k".into(),
+                secret_key: "s".into(),
+            });
+            assert_eq!(
+                resolve_syncer(&minio).unwrap().unwrap().delete_after_upload,
+                delete
+            );
+        }
+        let mut local = crate::config::default_config();
+        local.storage.backend = "local".into();
+        assert!(resolve_syncer(&local).unwrap().is_none());
     }
 }
