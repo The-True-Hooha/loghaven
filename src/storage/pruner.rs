@@ -61,8 +61,8 @@ pub async fn run_pruner(
 ///    oldest remaining date directories, across all apps.
 ///
 /// Today's and future date directories are never removed, and neither is
-/// anything that is not a real directory named like a date (the search index,
-/// stray files, symlinks).
+/// anything that is not a real directory named like a date (stray files, symlinks, old
+/// search-index directories).
 pub fn prune_once(
     data_path: &Path,
     today: i64,

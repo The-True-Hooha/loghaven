@@ -24,10 +24,11 @@ impl DaemonProcess {
         }
 
         let pid_str = fs::read_to_string(&pid_file)?;
-        let pid: u32 = pid_str
-            .trim()
-            .parse()
-            .map_err(|_| LogHavenError::Daemon("Invalid PID file".to_string()))?;
+        // an empty or garbled file means a crash mid-write: stale, not fatal
+        let Ok(pid) = pid_str.trim().parse::<u32>() else {
+            let _ = fs::remove_file(&pid_file);
+            return Ok(None);
+        };
 
         // Check if process is actually running
         #[cfg(unix)]
@@ -37,6 +38,8 @@ impl DaemonProcess {
 
             match kill(Pid::from_raw(pid as i32), None) {
                 Ok(_) => Ok(Some(pid)),
+                // alive, but owned by another user
+                Err(nix::errno::Errno::EPERM) => Ok(Some(pid)),
                 Err(_) => {
                     let _ = fs::remove_file(&pid_file);
                     Ok(None)
@@ -123,6 +126,13 @@ impl DaemonProcess {
 
     /// Removes the PID file only if it still names this process, so a failed
     /// second instance or a late exit never deletes another daemon's file.
+    /// Rewrites the PID file with this process's id. Used by the forked child
+    /// after the parent claimed the file.
+    pub fn update_pid(profile: Option<&str>) -> Result<()> {
+        fs::write(Self::get_pid_file(profile), std::process::id().to_string())?;
+        Ok(())
+    }
+
     pub fn remove_pid_if_owner(profile: Option<&str>) {
         let file = Self::get_pid_file(profile);
         if let Ok(s) = fs::read_to_string(&file)
@@ -188,5 +198,28 @@ mod tests {
         DaemonProcess::remove_pid_if_owner(Some(&profile));
         assert!(!file.exists());
         DaemonProcess::remove_pid_if_owner(Some(&profile)); // missing file is fine
+    }
+
+    #[test]
+    fn garbled_pid_file_is_stale_not_fatal() {
+        let profile = format!("test-garbled-{}", std::process::id());
+        let file = DaemonProcess::get_pid_file(Some(&profile));
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        for junk in ["", "abc", "12x", "-5"] {
+            fs::write(&file, junk).unwrap();
+            assert_eq!(
+                DaemonProcess::is_running(Some(&profile)).unwrap(),
+                None,
+                "{junk:?}"
+            );
+            assert!(!file.exists());
+        }
+        DaemonProcess::write_pid(Some(&profile)).unwrap();
+        assert_eq!(
+            DaemonProcess::is_running(Some(&profile)).unwrap(),
+            Some(std::process::id())
+        );
+        DaemonProcess::update_pid(Some(&profile)).unwrap();
+        DaemonProcess::remove_pid_if_owner(Some(&profile));
     }
 }

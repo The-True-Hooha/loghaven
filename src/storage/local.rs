@@ -215,7 +215,12 @@ impl ChunkFlusher {
             write_pending(app_dir, chunk_records, nonce, seq, records)
         })
         .await
-        .map_err(|e| LogHavenError::Storage(format!("flush task failed: {e}")))?;
+        .map_err(|e| {
+            // the batch is gone; skip a block of sequence numbers so a name that
+            // may already exist on disk is never reused
+            self.seq = self.seq.wrapping_add(1 << 16);
+            LogHavenError::Storage(format!("flush task failed, batch lost: {e}"))
+        })?;
 
         self.seq = out.seq;
         if out.wrote {

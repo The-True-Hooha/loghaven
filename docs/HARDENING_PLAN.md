@@ -1,5 +1,7 @@
 # LogHaven hardening plan
 
+Note: the tantivy search index mentioned in steps 3-4 was later removed (queries read Parquet only).
+
 Result of an end-to-end read of the codebase. Each step is implemented, tested,
 checked with `cargo fmt --check && cargo clippy -- -D warnings && cargo test`,
 reviewed by an independent adversarial pass (dod-design Phase 2), fixed once,

@@ -303,10 +303,26 @@ pub fn migrate_legacy_config() -> Result<Option<PathBuf>> {
 
 fn migrate_legacy_in(dir: &std::path::Path) -> Result<Option<PathBuf>> {
     let (new, legacy) = (dir.join("config.toml"), dir.join("config_toml"));
-    if new.exists() || !legacy.exists() {
+    if !legacy.exists() {
         return Ok(None);
     }
-    std::fs::rename(&legacy, &new)?;
+    if new.exists() {
+        eprintln!(
+            "Warning: both {} and {} exist; {} is used and the old file is ignored",
+            new.display(),
+            legacy.display(),
+            new.display()
+        );
+        return Ok(None);
+    }
+    std::fs::rename(&legacy, &new).map_err(|e| {
+        LogHavenError::Config(format!(
+            "cannot rename {} to {}: {}",
+            legacy.display(),
+            new.display(),
+            e
+        ))
+    })?;
     Ok(Some(new))
 }
 

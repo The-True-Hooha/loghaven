@@ -645,6 +645,48 @@ mod tests {
     }
 
     #[test]
+    fn range_inside_a_multi_row_group_file_reads_only_matching_groups() {
+        let fx = Fixture::new("multirg");
+        let records: Vec<LogRecord> = (0..30).map(|i| rec(T0 + i, &format!("m{i}"))).collect();
+        let path = fx
+            .tmp
+            .join("web")
+            .join(date_from_ms(T0))
+            .join("1-1.parquet");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let props = parquet::file::properties::WriterProperties::builder()
+            .set_max_row_group_row_count(Some(10))
+            .build();
+        let mut w = parquet::arrow::ArrowWriter::try_new(
+            File::create(&path).unwrap(),
+            crate::storage::record::log_schema(),
+            Some(props),
+        )
+        .unwrap();
+        w.write(&crate::storage::record::records_to_batch(&records).unwrap())
+            .unwrap();
+        w.close().unwrap();
+
+        let b = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
+        assert_eq!(b.metadata().num_row_groups(), 3);
+        assert_eq!(
+            overlapping_row_groups(b.metadata(), Some(T0 + 12), Some(T0 + 14)),
+            vec![1]
+        );
+        assert_eq!(
+            overlapping_row_groups(b.metadata(), Some(T0 + 9), Some(T0 + 10)),
+            vec![0, 1]
+        );
+        let f = QueryFilter {
+            from_ms: Some(T0 + 12),
+            to_ms: Some(T0 + 14),
+            ..filter()
+        };
+        let got = read_parquet_file(&path, &f, None).unwrap();
+        assert_eq!(got.len(), 3);
+    }
+
+    #[test]
     fn row_groups_outside_the_range_are_not_decoded() {
         let mut fx = Fixture::new("rg");
         let path = fx.chunk("web", vec![rec(T0, "a"), rec(T0 + 10, "b")]);

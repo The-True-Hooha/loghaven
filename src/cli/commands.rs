@@ -85,14 +85,19 @@ pub fn run(foreground: bool, profile: Option<&str>) -> Result<()> {
     style::step("Validating configuration...");
     cfg.validate()?;
 
+    // claimed before forking so a lost race is reported to the user, not the detached child
+    DaemonProcess::write_pid(profile)?;
+
     if !foreground {
         style::step("starting daemon in background...");
-        DaemonProcess::daemonize()?;
+        if let Err(e) = DaemonProcess::daemonize() {
+            DaemonProcess::remove_pid_if_owner(profile);
+            return Err(e);
+        }
+        DaemonProcess::update_pid(profile)?;
     } else {
         style::info("Running in foreground mode");
     }
-
-    DaemonProcess::write_pid(profile)?;
 
     style::success(&format!("Using storage backend: {}", cfg.storage.backend));
     style::success(&format!("Log level: {}", cfg.agent.log_level));
