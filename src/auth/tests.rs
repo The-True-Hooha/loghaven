@@ -72,7 +72,7 @@ fn jwt_invalid_token_rejected() {
 #[test]
 fn session_issue_and_verify_token() {
     let store = SessionStore::new(3600);
-    let (token_id, _secret) = store.issue("myapp").unwrap();
+    let (token_id, _secret, _) = store.issue("myapp").unwrap();
     let app = store.verify_session_token(&token_id).unwrap();
     assert_eq!(app, "myapp");
 }
@@ -84,20 +84,18 @@ fn session_unknown_token_rejected() {
 }
 
 #[test]
-fn session_expired_token_rejected() {
-    let store = SessionStore::new(0); // TTL = 0
-    let (token_id, _) = store.issue("app").unwrap();
-    // expires_at is now in the past
-    assert!(store.verify_session_token(&token_id).is_err());
+fn session_with_zero_ttl_is_refused_at_issue() {
+    // a session that would already be expired is never created
+    let store = SessionStore::new(0);
+    assert!(store.issue("app").is_err());
 }
 
 #[test]
-fn session_purge_removes_expired() {
-    let store = SessionStore::new(0);
-    store.issue("app").unwrap();
+fn session_purge_keeps_live_sessions() {
+    let store = SessionStore::new(3600);
+    let (tok, _, _) = store.issue("app").unwrap();
     store.purge_expired();
-    // after purge, nothing remains — verify any token fails
-    // just check purge doesn't panic
+    assert_eq!(store.verify_session_token(&tok).unwrap(), "app");
 }
 
 // --- Datagram signing + verification ---
@@ -105,10 +103,10 @@ fn session_purge_removes_expired() {
 #[test]
 fn datagram_sign_and_verify() {
     let store = SessionStore::new(3600);
-    let (token_id, secret) = store.issue("myapp").unwrap();
+    let (token_id, secret, _) = store.issue("myapp").unwrap();
 
     let payload = br#"{"app":"myapp","records":[]}"#;
-    let signed = sign_datagram(&token_id, &secret, payload).unwrap();
+    let signed = sign_datagram(&token_id, &secret, 1, payload).unwrap();
 
     let (app, recovered_payload) = store.verify_datagram(&signed).unwrap();
     assert_eq!(app, "myapp");
@@ -118,10 +116,10 @@ fn datagram_sign_and_verify() {
 #[test]
 fn datagram_tampered_payload_rejected() {
     let store = SessionStore::new(3600);
-    let (token_id, secret) = store.issue("myapp").unwrap();
+    let (token_id, secret, _) = store.issue("myapp").unwrap();
 
     let payload = b"original payload";
-    let mut signed = sign_datagram(&token_id, &secret, payload).unwrap();
+    let mut signed = sign_datagram(&token_id, &secret, 1, payload).unwrap();
 
     // flip last byte
     let last = signed.len() - 1;
@@ -140,8 +138,8 @@ fn datagram_missing_header_rejected() {
 #[test]
 fn datagram_empty_payload_signs_and_verifies() {
     let store = SessionStore::new(3600);
-    let (token_id, secret) = store.issue("app").unwrap();
-    let signed = sign_datagram(&token_id, &secret, b"").unwrap();
+    let (token_id, secret, _) = store.issue("app").unwrap();
+    let signed = sign_datagram(&token_id, &secret, 1, b"").unwrap();
     let (app, payload) = store.verify_datagram(&signed).unwrap();
     assert_eq!(app, "app");
     assert!(payload.is_empty());
@@ -150,8 +148,8 @@ fn datagram_empty_payload_signs_and_verifies() {
 #[test]
 fn session_multiple_apps_independent() {
     let store = SessionStore::new(3600);
-    let (tok_a, _) = store.issue("app_a").unwrap();
-    let (tok_b, _) = store.issue("app_b").unwrap();
+    let (tok_a, _, _) = store.issue("app_a").unwrap();
+    let (tok_b, _, _) = store.issue("app_b").unwrap();
 
     assert_eq!(store.verify_session_token(&tok_a).unwrap(), "app_a");
     assert_eq!(store.verify_session_token(&tok_b).unwrap(), "app_b");
@@ -160,25 +158,25 @@ fn session_multiple_apps_independent() {
 #[test]
 fn session_tokens_are_unique() {
     let store = SessionStore::new(3600);
-    let (tok1, _) = store.issue("app").unwrap();
-    let (tok2, _) = store.issue("app").unwrap();
+    let (tok1, _, _) = store.issue("app").unwrap();
+    let (tok2, _, _) = store.issue("app").unwrap();
     assert_ne!(tok1, tok2);
 }
 
 #[test]
 fn session_secrets_are_unique() {
     let store = SessionStore::new(3600);
-    let (_, secret1) = store.issue("app").unwrap();
-    let (_, secret2) = store.issue("app").unwrap();
+    let (_, secret1, _) = store.issue("app").unwrap();
+    let (_, secret2, _) = store.issue("app").unwrap();
     assert_ne!(secret1, secret2);
 }
 
 #[test]
 fn datagram_wrong_token_id_rejected() {
     let store = SessionStore::new(3600);
-    let (_, secret) = store.issue("app").unwrap();
+    let (_, secret, _) = store.issue("app").unwrap();
     // Sign with a valid secret but reference a nonexistent token_id
-    let signed = sign_datagram("nonexistent_token", &secret, b"payload").unwrap();
+    let signed = sign_datagram("nonexistent_token", &secret, 1, b"payload").unwrap();
     assert!(store.verify_datagram(&signed).is_err());
 }
 
