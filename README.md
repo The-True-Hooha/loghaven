@@ -24,6 +24,56 @@ LogHaven is a **local-first, chain-agnostic observability runtime** that ingests
 - Privacy-First - Client-side encryption, no vendor lock-in
 - Zero Ingestion Fees - No usage-based pricing traps
 
+## Roadmap
+
+LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
+
+| Phase | Theme | Status |
+|-------|-------|--------|
+| 0 - Foundation | Daemon, local storage, ingest, query API, auth, cloud sync | **Done** (v0.1, current) |
+| 1 - Usable end to end | Token issuing CLI, client SDK, `logs --follow` | **Next** |
+| 2 - Chain awareness | Ethereum adapter, tx-hash correlation | Planned |
+| 3 - Interfaces | TUI, dashboard | Planned |
+| 4 - Production hardening | Client-side encryption, multi-backend, persistent sessions, license | Planned |
+
+### Phase 0 - Foundation (done)
+
+- Daemon with CLI control over a Unix socket (TCP on Windows)
+- UDP ingest on `127.0.0.1:9100`: signed datagrams with replay protection, sessions scoped to one app
+- Storage as immutable Parquet chunks (`<app>/<YYYY-MM-DD>/*.parquet`), written atomically
+- Query API on `127.0.0.1:9200` (`GET /logs`): newest first, filters for level, source, time range and text, bounded in size, concurrency and time
+- S3, R2 and MinIO sync with retry; local copies are kept unless `delete_after_upload = true`
+- Pruner by retention days and size; never removes data that is not yet uploaded
+- Input validation (app names), CI-clean build, 100+ tests including an end-to-end ingest-to-query test
+
+### Phase 1 - Usable end to end (next)
+
+- `loghaven auth token <app>`: mint the RS256 JWT that `/auth` exchanges for a session (the signing code exists but has no command yet, so authenticated ingest cannot be driven from the CLI today)
+- A small client SDK (Rust first) that signs datagrams and manages counters and sessions
+- `loghaven logs --follow` for live tailing
+- Document the wire format (datagram header, payload JSON/msgpack)
+
+### Phase 2 - Chain awareness
+
+- Ethereum adapter (RPC and WebSocket), normalized event format
+- Correlate on-chain transactions with off-chain logs by `tx_hash` (`loghaven trace <tx>`)
+- Solana and Stellar adapters behind the same interface
+
+### Phase 3 - Interfaces
+
+- Terminal UI
+- Local web dashboard on the query API
+
+### Phase 4 - Production hardening
+
+- Client-side encryption
+- Multiple simultaneous storage backends (`primary` / `secondary`)
+- Persistent sessions across restarts
+- Column projection in queries, dedicated writer threads
+- Choose and publish a license
+
+Details of the completed hardening work are in [docs/HARDENING_PLAN.md](docs/HARDENING_PLAN.md).
+
 ## Quick Start
 
 ### Installation
@@ -368,6 +418,12 @@ loghaven/
 │   │   ├── mod.rs        # Config structures and loading
 │   │   ├── defaults.rs   # Default values
 │   │   └── validation.rs # Config validation
+│   ├── auth/             # RS256 keys, JWT, HMAC session tokens
+│   ├── daemon/           # Daemon lifecycle, IPC server, PID file
+│   ├── ingest/           # UDP ingest server and payload parsing
+│   ├── ipc/              # CLI-to-daemon protocol
+│   ├── query/            # HTTP query API
+│   ├── storage/          # Parquet chunks, query, cloud sync, pruner
 │   ├── error.rs          # Error types
 │   └── main.rs           # Entry point
 ├── scripts/
