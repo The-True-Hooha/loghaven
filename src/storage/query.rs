@@ -67,7 +67,7 @@ pub fn query(data_path: &Path, filter: &QueryFilter) -> Result<Vec<LogRecord>> {
             break;
         }
         for chunk_path in chunk_files(date_dir)? {
-            let records = match read_parquet_file(&chunk_path) {
+            let records = match read_parquet_file(&chunk_path, filter.from_ms, filter.to_ms) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!(
@@ -181,10 +181,49 @@ fn str_at(a: Option<&StringArray>, row: usize) -> Option<String> {
         .map(|a| a.value(row).to_string())
 }
 
-fn read_parquet_file(path: &Path) -> Result<Vec<LogRecord>> {
+/// Row groups whose `timestamp_ms` statistics cannot overlap `[from, to]` are
+/// not decoded. Groups without statistics are always read.
+fn overlapping_row_groups(
+    meta: &parquet::file::metadata::ParquetMetaData,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
+) -> Vec<usize> {
+    use parquet::file::statistics::Statistics;
+    let ts_col = meta
+        .file_metadata()
+        .schema_descr()
+        .columns()
+        .iter()
+        .position(|c| c.name() == "timestamp_ms");
+    (0..meta.num_row_groups())
+        .filter(|&i| {
+            let Some(col) = ts_col else { return true };
+            let Some(Statistics::Int64(st)) = meta.row_group(i).column(col).statistics() else {
+                return true;
+            };
+            let (Some(&min), Some(&max)) = (st.min_opt(), st.max_opt()) else {
+                return true;
+            };
+            !(from_ms.is_some_and(|f| max < f) || to_ms.is_some_and(|t| min > t))
+        })
+        .collect()
+}
+
+fn read_parquet_file(
+    path: &Path,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
+) -> Result<Vec<LogRecord>> {
     let file = File::open(path)?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .and_then(|b| b.build())
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| LogHavenError::Storage(e.to_string()))?;
+    let groups = overlapping_row_groups(builder.metadata(), from_ms, to_ms);
+    if groups.is_empty() {
+        return Ok(Vec::new());
+    }
+    let reader = builder
+        .with_row_groups(groups)
+        .build()
         .map_err(|e| LogHavenError::Storage(e.to_string()))?;
 
     let mut records = Vec::new();
@@ -606,5 +645,34 @@ mod tests {
         let mut huge = vec![rec(T0, &"x".repeat(MAX_RESULT_BYTES * 2))];
         trim_newest(&mut huge, 10, true);
         assert_eq!(huge.len(), 1);
+    }
+
+    #[test]
+    fn row_groups_outside_the_range_are_not_decoded() {
+        let mut fx = Fixture::new("rg");
+        let path = fx.chunk("web", vec![rec(T0, "a"), rec(T0 + 10, "b")]);
+        let meta = |from, to| {
+            let b = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
+            overlapping_row_groups(b.metadata(), from, to)
+        };
+        assert_eq!(meta(None, None), vec![0]);
+        assert_eq!(
+            meta(Some(T0 + 10), Some(T0 + 10)),
+            vec![0],
+            "bounds are inclusive"
+        );
+        assert!(meta(Some(T0 + 11), None).is_empty());
+        assert!(meta(None, Some(T0 - 1)).is_empty());
+        assert!(
+            read_parquet_file(&path, Some(T0 + 11), None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            read_parquet_file(&path, Some(T0), Some(T0 + 10))
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }

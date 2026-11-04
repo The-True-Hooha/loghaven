@@ -16,6 +16,12 @@ pub fn init(
 ) -> Result<()> {
     style::print_banner();
 
+    if profile.is_none()
+        && let Some(p) = config::migrate_legacy_config()?
+    {
+        style::info(&format!("Renamed legacy config_toml to {}", p.display()));
+    }
+
     let config_path = config::get_config_path(profile);
 
     if config_path.exists() && !force {

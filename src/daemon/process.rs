@@ -105,8 +105,18 @@ impl DaemonProcess {
             fs::create_dir_all(parent)?;
         }
 
-        let pid = std::process::id();
-        fs::write(&pid_file, pid.to_string())?;
+        // create_new: two instances starting together cannot both claim the file
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pid_file)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => {
+                    LogHavenError::Daemon("another instance owns the PID file".into())
+                }
+                _ => e.into(),
+            })?;
+        std::io::Write::write_all(&mut f, std::process::id().to_string().as_bytes())?;
 
         Ok(())
     }
@@ -169,7 +179,12 @@ mod tests {
         fs::write(&file, "999999999").unwrap();
         DaemonProcess::remove_pid_if_owner(Some(&profile));
         assert!(file.exists(), "foreign pid kept");
+        fs::remove_file(&file).unwrap();
         DaemonProcess::write_pid(Some(&profile)).unwrap();
+        assert!(
+            DaemonProcess::write_pid(Some(&profile)).is_err(),
+            "second claim fails"
+        );
         DaemonProcess::remove_pid_if_owner(Some(&profile));
         assert!(!file.exists());
         DaemonProcess::remove_pid_if_owner(Some(&profile)); // missing file is fine

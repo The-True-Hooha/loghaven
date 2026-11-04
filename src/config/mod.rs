@@ -292,6 +292,24 @@ pub fn get_config_path(profile: Option<&str>) -> PathBuf {
     config_path_in(&config_dir, profile)
 }
 
+/// Renames a legacy `config_toml` to `config.toml` when only the legacy file
+/// exists. Returns the new path if it migrated.
+pub fn migrate_legacy_config() -> Result<Option<PathBuf>> {
+    let dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("loghaven");
+    migrate_legacy_in(&dir)
+}
+
+fn migrate_legacy_in(dir: &std::path::Path) -> Result<Option<PathBuf>> {
+    let (new, legacy) = (dir.join("config.toml"), dir.join("config_toml"));
+    if new.exists() || !legacy.exists() {
+        return Ok(None);
+    }
+    std::fs::rename(&legacy, &new)?;
+    Ok(Some(new))
+}
+
 fn config_path_in(config_dir: &std::path::Path, profile: Option<&str>) -> PathBuf {
     match profile {
         Some(p) => config_dir.join(format!("{}.toml", p)),
@@ -332,8 +350,24 @@ mod path_tests {
         assert_eq!(config_path_in(&dir, Some("dev")), dir.join("dev.toml"));
         std::fs::write(dir.join("config_toml"), "").unwrap();
         assert_eq!(config_path_in(&dir, None), dir.join("config_toml"));
-        std::fs::write(dir.join("config.toml"), "").unwrap();
+        assert_eq!(
+            migrate_legacy_in(&dir).unwrap(),
+            Some(dir.join("config.toml"))
+        );
+        assert!(!dir.join("config_toml").exists());
         assert_eq!(config_path_in(&dir, None), dir.join("config.toml"));
+        assert_eq!(
+            migrate_legacy_in(&dir).unwrap(),
+            None,
+            "nothing left to migrate"
+        );
+        std::fs::write(dir.join("config_toml"), "other").unwrap();
+        assert_eq!(
+            migrate_legacy_in(&dir).unwrap(),
+            None,
+            "never overwrites config.toml"
+        );
+        assert!(dir.join("config_toml").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

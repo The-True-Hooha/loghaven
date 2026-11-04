@@ -83,7 +83,9 @@ End-to-end test: start ingest + query on ephemeral ports against a temp dir, sen
 ## Status
 Steps 0-8 implemented. Pruner additionally skips day directories with unsynced chunks when a cloud backend is configured, and day directories modified within the last hour. PID file is removed only by its owner.
 
-Known limits: chunk I/O on the async worker; full chunk decode per query; tantivy index is write-only; `init` does not migrate a legacy `config_toml`; PID file write is not an exclusive lock.
+Follow-ups done: chunk writes run in `spawn_blocking`; the write-only tantivy index was removed; queries skip row groups whose `timestamp_ms` statistics fall outside the range; `init` renames a legacy `config_toml`; the PID file is claimed with `create_new`.
+
+Known limit: a query still decodes all columns of every row group it reads (no column projection).
 
 ## Out of scope
 Chain adapters, TUI/dashboard, multi-backend `primary`/`secondary`, client-side encryption, persistent sessions.
