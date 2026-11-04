@@ -91,6 +91,7 @@ pub struct LocalStorageConfig {
     #[serde(default = "defaults::local_storage_path")]
     pub path: PathBuf,
 
+    /// Oldest day directories are removed when local data exceeds this. 0 = no limit.
     #[serde(default = "defaults::max_size_gb")]
     pub max_size_gb: u64,
 
@@ -106,6 +107,7 @@ pub struct LocalStorageConfig {
     #[serde(default = "defaults::flush_interval_secs")]
     pub flush_interval_secs: u64,
 
+    /// Day directories older than this are removed. 0 = keep forever.
     #[serde(default = "defaults::retention_days")]
     pub retention_days: u32,
 }

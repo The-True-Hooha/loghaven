@@ -29,6 +29,14 @@ pub fn date_from_ms(ms: i64) -> String {
     epoch_days_to_date(ms.div_euclid(86_400_000))
 }
 
+pub fn today_epoch_days() -> i64 {
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    ms.div_euclid(86_400_000)
+}
+
 pub fn today() -> String {
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
