@@ -152,9 +152,10 @@ How it behaves:
   Delete it to start again from `start_block`. A cursor file that is not a
   block number, or one far ahead of the chain head (wrong node or chain), stops
   the watcher with an error instead of guessing.
-- Delivery is best effort. Records travel over UDP and the cursor moves on once
-  they are sent, so a record lost on the way (for example while the daemon is
-  down) is not re-sent. A crash or error between sending and saving the cursor
+- Delivery is best effort. With auth on, the watcher stops with an error and
+  keeps its cursor when the daemon cannot be reached. Once datagrams are sent
+  over UDP, a record the daemon drops (for example because it crashed right
+  then) is not re-sent. A crash or error between sending and saving the cursor
   can send the same events again, so a trace may show an event twice.
 - `confirmations` is the only reorg protection. A reorg deeper than that is not
   corrected, and `confirmations = 0` has no protection at all. Logs the node
