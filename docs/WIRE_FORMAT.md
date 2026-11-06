@@ -81,7 +81,8 @@ queryable after that.
 
 ## Querying
 
-`GET /logs?app=<app>&level=&source=&from_ms=&to_ms=&text=&limit=` with header
+`GET /logs?app=<app>&level=&source=&from_ms=&to_ms=&text=&tx_hash=&limit=` with header
 `Authorization: Bearer <token_id>` when auth is on. The token must belong to
 the same app. `limit` is 1..=10000 (default 1000); results are newest first.
 `text` is a case-insensitive substring match on message, tags and metadata.
+`tx_hash` is an exact match, except that a `0x`+hex value ignores ASCII case; an empty `tx_hash` is a 400.

@@ -64,7 +64,7 @@ pub async fn post_auth(
     }))
 }
 
-// GET /logs?app=&level=&source=&from_ms=&to_ms=&text=&limit=
+// GET /logs?app=&level=&source=&from_ms=&to_ms=&text=&tx_hash=&limit=
 #[derive(Deserialize)]
 pub struct LogsParams {
     pub app: String,
@@ -73,6 +73,7 @@ pub struct LogsParams {
     pub from_ms: Option<i64>,
     pub to_ms: Option<i64>,
     pub text: Option<String>,
+    pub tx_hash: Option<String>,
     pub limit: Option<usize>,
 }
 
@@ -127,6 +128,10 @@ pub async fn get_logs(
         return Err((StatusCode::BAD_REQUEST, "from_ms is after to_ms".into()));
     }
 
+    if params.tx_hash.as_deref().is_some_and(str::is_empty) {
+        return Err((StatusCode::BAD_REQUEST, "tx_hash must not be empty".into()));
+    }
+
     let filter = QueryFilter {
         app: params.app,
         level: params.level,
@@ -134,6 +139,7 @@ pub async fn get_logs(
         from_ms: params.from_ms,
         to_ms: params.to_ms,
         text: params.text,
+        tx_hash: params.tx_hash,
         limit,
     };
 
@@ -195,6 +201,7 @@ mod tests {
             from_ms: None,
             to_ms: None,
             text: None,
+            tx_hash: None,
             limit: None,
         }
     }
@@ -321,6 +328,46 @@ mod tests {
         assert_eq!(r.0.records.len(), 1);
         assert_eq!(r.0.records[0].message, "ok");
         let _ = std::fs::remove_dir_all(&st.data_path);
+    }
+
+    #[tokio::test]
+    async fn logs_filters_by_tx_hash_and_rejects_empty() {
+        let st = state_at("tx");
+        let _ = std::fs::remove_dir_all(&st.data_path);
+        let mut a = crate::storage::record::LogRecord::new("web", "info", "src", "hit");
+        a.timestamp_ms = 1_700_000_000_000;
+        a.tx_hash = Some("0xabc".into());
+        let mut b = crate::storage::record::LogRecord::new("web", "info", "src", "miss");
+        b.timestamp_ms = 1_700_000_000_001;
+        let dir = st
+            .data_path
+            .join("web")
+            .join(crate::storage::date::date_from_ms(a.timestamp_ms));
+        crate::storage::writer::write_chunk(&dir.join("0000000000001-00001.parquet"), &[a, b])
+            .unwrap();
+
+        let mut p = params("web");
+        p.tx_hash = Some("0xABC".into());
+        let r = get_logs(State(st.clone()), HeaderMap::new(), Query(p))
+            .await
+            .unwrap();
+        assert_eq!(r.0.records.len(), 1);
+        assert_eq!(r.0.records[0].message, "hit");
+
+        let mut p = params("web");
+        p.tx_hash = Some(String::new());
+        let r = get_logs(State(st.clone()), HeaderMap::new(), Query(p)).await;
+        assert_eq!(r.err().unwrap().0, StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(&st.data_path);
+    }
+
+    #[tokio::test]
+    async fn logs_tx_hash_does_not_cross_app_scope() {
+        let (st, web, _api) = auth_state();
+        let mut p = params("api");
+        p.tx_hash = Some("0xabc".into());
+        let r = get_logs(State(st), bearer(&web), Query(p)).await;
+        assert_eq!(r.err().unwrap().0, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
