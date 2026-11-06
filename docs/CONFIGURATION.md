@@ -188,5 +188,5 @@ How it behaves:
 | Query `limit` | 1 to 10000 (HTTP default 1000, CLI default 100) |
 | Query result size | about 64 MiB, 4 concurrent queries, 30 s timeout |
 | Sessions per app | 32 (oldest evicted) |
-| Datagram size | one UDP packet (65507 bytes including the auth header) |
+| Datagram size | one UDP packet (65507 bytes including the auth header; 9000 for the Rust client on macOS) |
 | Records held in memory when the disk is failing | 100000 records or 256 MiB, oldest dropped first |

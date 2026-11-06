@@ -547,7 +547,7 @@ pub fn trace(
             .map_err(|e| crate::error::LogHavenError::Daemon(format!("app '{app}': {e}")))?;
             if fetched.len() >= limit {
                 style::warning(&format!(
-                    "'{app}' hit --limit {limit}; older matches are not shown"
+                    "'{app}' returned {limit} records (--limit); older matches may not be shown"
                 ));
             }
             all.extend(fetched);
