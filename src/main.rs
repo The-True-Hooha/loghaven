@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 mod auth;
+mod chain;
 mod cli;
 mod client;
 mod query;

@@ -1,5 +1,6 @@
 mod defaults;
 mod validation;
+pub use validation::validate_ethereum;
 
 use crate::error::{LogHavenError, Result};
 use serde::{Deserialize, Serialize};
@@ -151,7 +152,27 @@ pub struct ChainsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EthereumConfig {
     pub rpc_url: String,
+    /// Not used yet: the adapter polls `rpc_url` over HTTP.
     pub ws_url: Option<String>,
+    /// App the chain events are recorded under.
+    #[serde(default = "defaults::ethereum_app")]
+    pub app: String,
+    /// Contract addresses to watch (`0x` + 40 hex). At least one is required.
+    #[serde(default)]
+    pub addresses: Vec<String>,
+    /// Optional event signature hashes (topic0, `0x` + 64 hex); any of them matches.
+    #[serde(default)]
+    pub topics: Vec<String>,
+    #[serde(default = "defaults::ethereum_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    /// Only blocks this many behind the head are read, as protection against reorgs.
+    #[serde(default = "defaults::ethereum_confirmations")]
+    pub confirmations: u64,
+    /// Largest block span of one `eth_getLogs` call.
+    #[serde(default = "defaults::ethereum_max_block_range")]
+    pub max_block_range: u64,
+    /// First block of the first run; defaults to the newest confirmed block.
+    pub start_block: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

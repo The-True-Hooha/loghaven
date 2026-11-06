@@ -77,3 +77,19 @@ pub fn session_ttl_secs() -> u64 {
 pub fn query_port() -> u16 {
     9200
 }
+
+pub fn ethereum_app() -> String {
+    "ethereum".to_string()
+}
+
+pub fn ethereum_poll_interval_secs() -> u64 {
+    12
+}
+
+pub fn ethereum_confirmations() -> u64 {
+    6
+}
+
+pub fn ethereum_max_block_range() -> u64 {
+    1000
+}

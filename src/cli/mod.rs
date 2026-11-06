@@ -30,6 +30,18 @@ pub struct Cli {
 }
 
 #[derive(Subcommand)]
+pub enum WatchCommands {
+    #[command(about = "Poll Ethereum contract logs (settings: [chains.ethereum] in config)")]
+    Ethereum {
+        #[arg(long, help = "Process the available blocks once and exit")]
+        once: bool,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum Commands {
     #[command(visible_alias = "i")]
     Init {
@@ -159,6 +171,12 @@ pub enum Commands {
         profile: Option<String>,
     },
 
+    #[command(about = "Watch a blockchain and record its events as logs")]
+    Watch {
+        #[command(subcommand)]
+        chain: WatchCommands,
+    },
+
     #[command(about = "Send log records to the local daemon (for testing and scripts)")]
     Send {
         #[arg(value_name = "APP")]
@@ -268,6 +286,9 @@ pub fn execute(cli: Cli) -> crate::error::Result<()> {
             follow,
             profile.as_deref(),
         ),
+        Some(Commands::Watch {
+            chain: WatchCommands::Ethereum { once, profile },
+        }) => commands::watch_ethereum(once, profile.as_deref()),
         Some(Commands::Trace {
             tx_hash,
             apps,

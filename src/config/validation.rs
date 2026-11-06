@@ -28,13 +28,14 @@ pub fn validate(config: &Config) -> Result<()> {
 
     for chain in &config.chains.enabled {
         match chain.as_str() {
-            "ethereum" => {
-                if config.chains.ethereum.is_none() {
+            "ethereum" => match &config.chains.ethereum {
+                None => {
                     return Err(LogHavenError::Config(
                         "Ethereum enabled but no config provided".to_string(),
                     ));
                 }
-            }
+                Some(eth) => validate_ethereum(eth)?,
+            },
             "solana" => {
                 if config.chains.solana.is_none() {
                     return Err(LogHavenError::Config(
@@ -104,6 +105,36 @@ fn validate_minio_storage(config: &Config) -> Result<()> {
         return Err(LogHavenError::Config(
             "MinIO config requires access_key and secret_key".into(),
         ));
+    }
+    Ok(())
+}
+
+fn is_hex_with_len(s: &str, hex_len: usize) -> bool {
+    s.strip_prefix("0x")
+        .is_some_and(|h| h.len() == hex_len && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Checked when the chain is enabled and again by `loghaven watch ethereum`.
+pub fn validate_ethereum(eth: &super::EthereumConfig) -> Result<()> {
+    let bad = |msg: String| Err(LogHavenError::Config(format!("chains.ethereum: {msg}")));
+    if !(eth.rpc_url.starts_with("http://") || eth.rpc_url.starts_with("https://")) {
+        return bad("rpc_url must start with http:// or https://".into());
+    }
+    crate::storage::validate_app_name(&eth.app)?;
+    if eth.addresses.is_empty() {
+        return bad("addresses must list at least one contract address".into());
+    }
+    if let Some(a) = eth.addresses.iter().find(|a| !is_hex_with_len(a, 40)) {
+        return bad(format!("'{a}' is not a 0x-prefixed 20-byte address"));
+    }
+    if let Some(t) = eth.topics.iter().find(|t| !is_hex_with_len(t, 64)) {
+        return bad(format!("'{t}' is not a 0x-prefixed 32-byte topic"));
+    }
+    if eth.poll_interval_secs == 0 {
+        return bad("poll_interval_secs must be at least 1".into());
+    }
+    if !(1..=10_000).contains(&eth.max_block_range) {
+        return bad("max_block_range must be between 1 and 10000".into());
     }
     Ok(())
 }

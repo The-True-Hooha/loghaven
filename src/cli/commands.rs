@@ -562,6 +562,82 @@ pub fn trace(
     })
 }
 
+pub fn watch_ethereum(once: bool, profile: Option<&str>) -> Result<()> {
+    use crate::chain::ethereum::{HttpRpc, poll, read_cursor, write_cursor};
+
+    let config_path = config::get_config_path(profile);
+    let cfg = Config::load(&config_path)?;
+    let eth = cfg.chains.ethereum.clone().ok_or_else(|| {
+        crate::error::LogHavenError::Config(
+            "no [chains.ethereum] section in the config; see docs/CONFIGURATION.md".into(),
+        )
+    })?;
+    config::validate_ethereum(&eth)?;
+    let cursor_path = config_path.with_file_name("ethereum.cursor");
+    let rpc = HttpRpc::new(&eth.rpc_url)?;
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        style::info(&format!(
+            "Watching {} address(es) as app '{}'; Ctrl+C to stop",
+            eth.addresses.len(),
+            eth.app
+        ));
+        let mut last_warning = String::new();
+        loop {
+            let step_fut = async {
+                let cursor = read_cursor(&cursor_path)?;
+                let batch = tokio::select! {
+                    _ = tokio::signal::ctrl_c() => return Ok(None),
+                    b = poll(&rpc, &eth, cursor) => b?,
+                };
+                // not cancellable: the cursor must follow a send that has started
+                if !batch.records.is_empty() {
+                    let mut client =
+                        crate::client::IngestClient::connect(&cfg, &eth.app, SESSION_TTL_SECS)
+                            .await?;
+                    client.send(&batch.records).await?;
+                    style::info(&format!("Recorded {} event(s)", batch.records.len()));
+                }
+                write_cursor(&cursor_path, batch.next_block)?;
+                Ok::<_, crate::error::LogHavenError>(Some(batch.more))
+            };
+            let step = match step_fut.await {
+                Ok(None) => return Ok(()),
+                Ok(Some(more)) => Ok(more),
+                Err(e) => Err(e),
+            };
+            let more = match step {
+                Ok(more) => {
+                    last_warning.clear();
+                    more
+                }
+                // the node or daemon may be down for a while; retry, saying each problem once
+                Err(e) => {
+                    if once {
+                        return Err(e);
+                    }
+                    let msg = e.to_string();
+                    if msg != last_warning {
+                        style::warning(&msg);
+                        last_warning = msg;
+                    }
+                    false
+                }
+            };
+            if once && !more {
+                return Ok(());
+            }
+            if !more {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => return Ok(()),
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(eth.poll_interval_secs)) => {}
+                }
+            }
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn poll_page(
     port: u16,
