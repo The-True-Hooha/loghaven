@@ -69,6 +69,7 @@ impl DaemonServer {
             std::fs::create_dir_all(parent)?;
         }
 
+        check_socket_path_len(&self.socket_path)?;
         let listener = UnixListener::bind(&self.socket_path)
             .map_err(|e| LogHavenError::Daemon(format!("Failed to bind socket: {}", e)))?;
 
@@ -277,5 +278,44 @@ mod tests {
         let (json, stop) = DaemonServer::handle_request("nonsense", 0, &cfg, &sessions, None);
         assert!(!stop);
         assert!(!serde_json::from_str::<Response>(&json).unwrap().success);
+    }
+}
+
+/// `sun_path` holds 104 bytes on Apple and BSD targets and 108 elsewhere, including the final NUL.
+#[cfg(unix)]
+const SUN_PATH_MAX: usize = if cfg!(target_vendor = "apple") {
+    104
+} else {
+    108
+};
+
+#[cfg(unix)]
+fn check_socket_path_len(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let len = path.as_os_str().as_bytes().len();
+    if len >= SUN_PATH_MAX {
+        return Err(LogHavenError::Daemon(format!(
+            "socket path is {len} bytes but this system allows at most {}: {}; \
+             set daemon.socket_path in the config to a shorter path, or use a shorter HOME",
+            SUN_PATH_MAX - 1,
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod socket_path_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn socket_path_at_the_limit_is_accepted_and_one_more_byte_is_not() {
+        let at_limit = PathBuf::from(format!("/{}", "a".repeat(SUN_PATH_MAX - 2)));
+        assert!(check_socket_path_len(&at_limit).is_ok());
+        let over = PathBuf::from(format!("/{}", "a".repeat(SUN_PATH_MAX - 1)));
+        let e = check_socket_path_len(&over).unwrap_err().to_string();
+        assert!(e.contains("daemon.socket_path"), "{e}");
+        assert!(e.contains(&format!("{}", SUN_PATH_MAX)), "{e}");
     }
 }

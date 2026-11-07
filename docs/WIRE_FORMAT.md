@@ -69,7 +69,8 @@ JSON. The daemon tries JSON first; only if that fails and the first byte is not 
 `level`, `source`, `message` are required; the rest are optional. `app` must
 equal the session's app and match `[a-z0-9._-]{1,64}` (no leading or trailing
 dot, no Windows device names such as `con`). The daemon assigns the id and the
-timestamp when it receives the datagram.
+timestamp when it receives the datagram. A `tx_hash` that is `0x` followed by hex
+is stored lowercase, so a query returns `0xabc...` even if you sent `0xABC...`.
 
 ## Delivery semantics
 
@@ -85,4 +86,4 @@ queryable after that.
 `Authorization: Bearer <token_id>` when auth is on. The token must belong to
 the same app. `limit` is 1..=10000 (default 1000); results are newest first.
 `text` is a case-insensitive substring match on message, tags and metadata.
-`tx_hash` is an exact match, except that a `0x`+hex value ignores ASCII case; an empty `tx_hash` is a 400.
+`tx_hash` is an exact match, except that a `0x`+hex value ignores ASCII case (the daemon stores such values lowercase); an empty `tx_hash` is a 400.

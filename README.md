@@ -120,7 +120,7 @@ Every command accepts `--profile <NAME>` to use `<NAME>.toml` instead of `config
 | `loghaven auth token <APP> [--ttl-secs N]` | Print a signed JWT for an app (default 3600 s, max 30 days). |
 | `loghaven send <APP> <MESSAGE> [options]` | Send records. Options: `--level` (default `info`), `--source` (default `cli`), `--count`, `--chain`, `--tx-hash`, `--trace-id`. |
 | `loghaven watch ethereum [--once]` | Poll Ethereum contract logs and record them as logs (settings in `[chains.ethereum]`, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#chainsethereum)). |
-| `loghaven trace <TX_HASH> --app <APP> [--app <APP>...]` | Show the records that carry one transaction hash, oldest first, merged across the apps you name. Options: `--from MS`, `--to MS`, `--limit` (default 1000: newest N per app and overall), `--token` (one app only). `0x`+hex hashes match ignoring case; other chains match exactly. |
+| `loghaven trace <TX_HASH> --app <APP> [--app <APP>...]` | Show the records that carry one transaction hash, oldest first, merged across the apps you name. Options: `--from MS`, `--to MS`, `--limit` (default 1000: newest N per app and overall), `--token` (one app only). `0x`+hex hashes match ignoring case (they are stored lowercase in chunks written after v0.2.0); other chains match exactly. |
 | `loghaven logs <APP> [options]` | Query records. Options: `--level`, `--source`, `--from MS`, `--to MS`, `--text`, `--limit` (default 100), `--token`, `--follow`. |
 
 Short aliases: `i` (init), `r` (run), `s` (status), `st` (stop).
@@ -264,7 +264,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 
 ### Phase 2 - Chain awareness
 
-- Done: `GET /logs?tx_hash=` and `loghaven trace <tx> --app ...` correlate records by transaction hash across apps. A trace without `--from`/`--to` scans every chunk of each app, so it can be slow on large data sets.
+- Done: `GET /logs?tx_hash=` and `loghaven trace <tx> --app ...` correlate records by transaction hash across apps. Chunks written after v0.2.0 carry a bloom filter on `tx_hash`, so a trace skips chunks that cannot contain the hash. Older chunks are still scanned in full, and `--from`/`--to` narrow the scan for both.
 - Done: Ethereum adapter (`loghaven watch ethereum`): HTTP polling of `eth_getLogs` for configured contracts, confirmation depth, persisted cursor, normalized records. WebSocket subscriptions are not built yet.
 - Solana and Stellar adapters behind the same interface
 
