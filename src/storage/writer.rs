@@ -2,11 +2,43 @@ use crate::error::{LogHavenError, Result};
 use crate::storage::record::{LogRecord, log_schema, records_to_batch};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
+use parquet::schema::types::ColumnPath;
+use std::borrow::Cow;
 use std::fs::{File, create_dir_all};
 use std::path::Path;
 
 const TMP_SUFFIX: &str = "parquet.tmp";
+
+/// File metadata key set when every EVM-style `tx_hash` in the file is stored
+/// lowercase, which lets a reader test the tx_hash bloom filter for one spelling.
+pub const TX_FOLDED_KEY: &str = "loghaven.tx_hash_folded";
+
+/// Lowercases `0x`+hex transaction hashes: they are case-insensitive, and a
+/// single spelling is what makes the bloom filter usable.
+fn fold_tx_hashes(records: &[LogRecord]) -> Cow<'_, [LogRecord]> {
+    let needs = |r: &LogRecord| {
+        r.tx_hash.as_deref().is_some_and(|h| {
+            crate::storage::query::is_evm_hash(h) && h.bytes().any(|b| b.is_ascii_uppercase())
+        })
+    };
+    if !records.iter().any(needs) {
+        return Cow::Borrowed(records);
+    }
+    Cow::Owned(
+        records
+            .iter()
+            .cloned()
+            .map(|mut r| {
+                if needs(&r) {
+                    r.tx_hash = r.tx_hash.map(|h| h.to_ascii_lowercase());
+                }
+                r
+            })
+            .collect(),
+    )
+}
 
 fn storage_err(e: impl std::fmt::Display) -> LogHavenError {
     LogHavenError::Storage(e.to_string())
@@ -37,13 +69,22 @@ pub fn write_chunk(path: &Path, records: &[LogRecord]) -> Result<()> {
 }
 
 fn write_tmp(tmp: &Path, records: &[LogRecord]) -> Result<()> {
+    let records = fold_tx_hashes(records);
     let file = File::create(tmp)?;
+    let tx = ColumnPath::from("tx_hash");
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(Default::default()))
+        .set_column_bloom_filter_enabled(tx.clone(), true)
+        .set_column_bloom_filter_max_ndv(tx.clone(), records.len().max(1) as u64)
+        .set_column_bloom_filter_fpp(tx, 0.01)
+        .set_key_value_metadata(Some(vec![KeyValue::new(
+            TX_FOLDED_KEY.to_string(),
+            "1".to_string(),
+        )]))
         .build();
     let mut writer = ArrowWriter::try_new(file, log_schema(), Some(props)).map_err(storage_err)?;
     writer
-        .write(&records_to_batch(records)?)
+        .write(&records_to_batch(&records)?)
         .map_err(storage_err)?;
     let file = writer.into_inner().map_err(storage_err)?;
     file.sync_all()?;

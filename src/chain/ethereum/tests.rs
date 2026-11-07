@@ -10,6 +10,7 @@ struct Mock {
     calls: RefCell<Vec<(String, Value)>>,
     fail_blocks: bool,
     max_span: Option<u64>,
+    chain_id: u64,
 }
 
 impl Mock {
@@ -20,6 +21,7 @@ impl Mock {
             calls: RefCell::new(vec![]),
             fail_blocks: false,
             max_span: None,
+            chain_id: 1,
         }
     }
 }
@@ -31,6 +33,7 @@ impl Rpc for Mock {
             .push((method.into(), params.clone()));
         match method {
             "eth_blockNumber" => Ok(json!(format!("{:#x}", self.head))),
+            "eth_chainId" => Ok(json!(format!("{:#x}", self.chain_id))),
             "eth_getLogs" => {
                 let from = quantity(&params[0]["fromBlock"], "from")?;
                 let to = quantity(&params[0]["toBlock"], "to")?;
@@ -253,15 +256,67 @@ fn malformed_log_is_an_error_not_a_skip() {
 fn cursor_file_round_trips_and_garbage_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("ethereum.cursor");
-    assert_eq!(read_cursor(&p).unwrap(), None);
-    write_cursor(&p, 42).unwrap();
-    assert_eq!(read_cursor(&p).unwrap(), Some(42));
-    write_cursor(&p, 43).unwrap();
-    assert_eq!(read_cursor(&p).unwrap(), Some(43));
-    for bad in ["not a number", ""] {
+    assert!(read_cursor(&p).unwrap().is_none());
+    write_cursor(&p, 42, "abc").unwrap();
+    let c = read_cursor(&p).unwrap().unwrap();
+    assert_eq!((c.next_block, c.binding.as_deref()), (42, Some("abc")));
+    write_cursor(&p, 43, "abc").unwrap();
+    assert_eq!(read_cursor(&p).unwrap().unwrap().next_block, 43);
+    for bad in ["not a number", "", "\nabc"] {
         std::fs::write(&p, bad).unwrap();
         assert!(read_cursor(&p).is_err(), "{bad:?}");
     }
+}
+
+#[test]
+fn cursor_from_0_2_0_has_no_binding_and_is_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("ethereum.cursor");
+    std::fs::write(&p, "995").unwrap();
+    let c = read_cursor(&p).unwrap().unwrap();
+    assert_eq!((c.next_block, c.binding.as_deref()), (995, None));
+    assert!(check_binding(&c, "anything").is_ok());
+    std::fs::write(&p, "995\n\n").unwrap();
+    let c = read_cursor(&p).unwrap().unwrap();
+    assert_eq!(c.binding, None);
+}
+
+#[test]
+fn binding_changes_with_chain_addresses_and_topics_but_not_order_or_case() {
+    let rpc = Mock::new(120, vec![]);
+    let b = |c: &EthereumConfig| block_on(binding(&rpc, c)).unwrap();
+    let other = "0x00000000000000000000000000000000000000bb".to_string();
+    let base = b(&cfg());
+    assert_eq!(base, b(&cfg()));
+    let more = EthereumConfig {
+        addresses: vec![ADDR.into(), other.clone()],
+        ..cfg()
+    };
+    assert_ne!(base, b(&more));
+    let reordered = EthereumConfig {
+        addresses: vec![other.to_uppercase().replace("0X", "0x"), ADDR.into()],
+        ..cfg()
+    };
+    assert_eq!(b(&more), b(&reordered));
+    let topic = EthereumConfig {
+        topics: vec![TOPIC.into()],
+        ..cfg()
+    };
+    assert_ne!(base, b(&topic));
+    let mut rpc2 = Mock::new(120, vec![]);
+    rpc2.chain_id = 137;
+    assert_ne!(base, block_on(binding(&rpc2, &cfg())).unwrap());
+}
+
+#[test]
+fn a_cursor_saved_for_other_settings_is_refused() {
+    let saved = Cursor {
+        next_block: 10,
+        binding: Some("old".into()),
+    };
+    let e = check_binding(&saved, "new").unwrap_err().to_string();
+    assert!(e.contains("another chain"), "{e}");
+    assert!(check_binding(&saved, "old").is_ok());
 }
 
 #[test]
