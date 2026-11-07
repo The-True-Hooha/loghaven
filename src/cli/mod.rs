@@ -30,6 +30,18 @@ pub struct Cli {
 }
 
 #[derive(Subcommand)]
+pub enum WatchCommands {
+    #[command(about = "Poll Ethereum contract logs (settings: [chains.ethereum] in config)")]
+    Ethereum {
+        #[arg(long, help = "Process the available blocks once and exit")]
+        once: bool,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum Commands {
     #[command(visible_alias = "i")]
     Init {
@@ -120,6 +132,49 @@ pub enum Commands {
 
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+    },
+
+    #[command(about = "Show the records that carry one transaction hash, oldest first")]
+    Trace {
+        #[arg(value_name = "TX_HASH")]
+        tx_hash: String,
+
+        #[arg(
+            long = "app",
+            value_name = "APP",
+            required = true,
+            help = "App to search; repeat to correlate several apps"
+        )]
+        apps: Vec<String>,
+
+        #[arg(long, value_name = "MS")]
+        from: Option<i64>,
+
+        #[arg(long, value_name = "MS")]
+        to: Option<i64>,
+
+        #[arg(
+            long,
+            default_value = "1000",
+            help = "Newest N records to fetch per app and to print overall"
+        )]
+        limit: usize,
+
+        #[arg(
+            long,
+            value_name = "TOKEN",
+            help = "Session token_id; only valid for one app, so omit it with several --app"
+        )]
+        token: Option<String>,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+
+    #[command(about = "Watch a blockchain and record its events as logs")]
+    Watch {
+        #[command(subcommand)]
+        chain: WatchCommands,
     },
 
     #[command(about = "Send log records to the local daemon (for testing and scripts)")]
@@ -231,6 +286,18 @@ pub fn execute(cli: Cli) -> crate::error::Result<()> {
             follow,
             profile.as_deref(),
         ),
+        Some(Commands::Watch {
+            chain: WatchCommands::Ethereum { once, profile },
+        }) => commands::watch_ethereum(once, profile.as_deref()),
+        Some(Commands::Trace {
+            tx_hash,
+            apps,
+            from,
+            to,
+            limit,
+            token,
+            profile,
+        }) => commands::trace(tx_hash, apps, from, to, limit, token, profile.as_deref()),
         Some(Commands::Send {
             app,
             message,

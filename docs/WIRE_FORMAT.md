@@ -39,7 +39,7 @@ user that owns it.
 
 - `counter`: decimal u64, starts at 1, must be unique per session and below `2^64-1`. A counter is accepted once; counters up to 64 behind the highest seen are still accepted (UDP reordering), older ones are dropped.
 - `hmac_hex`: lowercase hex of `HMAC-SHA256(secret, counter as 8 bytes big-endian || payload)`, where `secret` is the decoded `secret_hex`.
-- The whole datagram must fit in one UDP packet (65507 bytes). Keep payloads under about 65300 bytes. Sending thousands of datagrams back to back can overflow the daemon's socket buffer and drop some silently; pace large bursts.
+- The whole datagram must fit in one UDP packet (65507 bytes; on macOS the default `net.inet.udp.maxdgram` limits it to 9216, and the Rust client uses 9000). Keep payloads under about 65300 bytes, or under 9000 on macOS. Sending thousands of datagrams back to back can overflow the daemon's socket buffer and drop some silently; pace large bursts.
 
 With `auth.require_auth = false` (dev only) the datagram is just the payload, with no header.
 
@@ -81,7 +81,8 @@ queryable after that.
 
 ## Querying
 
-`GET /logs?app=<app>&level=&source=&from_ms=&to_ms=&text=&limit=` with header
+`GET /logs?app=<app>&level=&source=&from_ms=&to_ms=&text=&tx_hash=&limit=` with header
 `Authorization: Bearer <token_id>` when auth is on. The token must belong to
 the same app. `limit` is 1..=10000 (default 1000); results are newest first.
 `text` is a case-insensitive substring match on message, tags and metadata.
+`tx_hash` is an exact match, except that a `0x`+hex value ignores ASCII case; an empty `tx_hash` is a 400.

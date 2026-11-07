@@ -1,6 +1,6 @@
 pub mod payload;
 #[cfg(test)]
-mod tests;
+mod payload_tests;
 
 use crate::auth::session::SessionStore;
 use crate::error::Result;

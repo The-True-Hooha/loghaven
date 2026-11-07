@@ -486,6 +486,158 @@ pub fn logs(
     })
 }
 
+/// Oldest first with id as tie-break, one row per record id, trimmed to the newest `limit`.
+fn merge_trace(
+    mut records: Vec<crate::storage::record::LogRecord>,
+    limit: usize,
+) -> Vec<crate::storage::record::LogRecord> {
+    records.sort_by(|a, b| (a.timestamp_ms, &a.id).cmp(&(b.timestamp_ms, &b.id)));
+    records.dedup_by(|a, b| a.id == b.id);
+    let excess = records.len().saturating_sub(limit);
+    records.drain(..excess);
+    records
+}
+
+pub fn trace(
+    tx_hash: String,
+    apps: Vec<String>,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
+    limit: usize,
+    token: Option<String>,
+    profile: Option<&str>,
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    let apps: Vec<String> = apps
+        .into_iter()
+        .filter(|a| seen.insert(a.clone()))
+        .collect();
+    if token.is_some() && apps.len() > 1 {
+        return Err(crate::error::LogHavenError::Config(
+            "--token is valid for one app; omit it to trace several apps".into(),
+        ));
+    }
+    let tx = tx_hash.trim().to_string();
+    if tx.is_empty() {
+        return Err(crate::error::LogHavenError::Config(
+            "tx hash is empty".into(),
+        ));
+    }
+    let config_path = config::get_config_path(profile);
+    let cfg = Config::load(&config_path)?;
+    let port = cfg.auth.query_port;
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let mut all = Vec::new();
+        for app in &apps {
+            let mut tok = QueryToken {
+                cfg: &cfg,
+                app,
+                explicit: token.clone(),
+                current: None,
+            };
+            let mut params = logs_params(app, limit, &None, &None, from_ms, to_ms, &None);
+            params.push(("tx_hash", tx.clone()));
+            let fetched = async {
+                let t = tok.get().await?;
+                crate::client::fetch_logs(port, &params, t.as_deref()).await
+            }
+            .await
+            .map_err(|e| crate::error::LogHavenError::Daemon(format!("app '{app}': {e}")))?;
+            if fetched.len() >= limit {
+                style::warning(&format!(
+                    "'{app}' returned {limit} records (--limit); older matches may not be shown"
+                ));
+            }
+            all.extend(fetched);
+        }
+        let all = merge_trace(all, limit);
+        style::success(&format!("{} records for {tx}", all.len()));
+        for r in &all {
+            print!("{:<12} ", r.app);
+            print_record(r);
+        }
+        Ok(())
+    })
+}
+
+pub fn watch_ethereum(once: bool, profile: Option<&str>) -> Result<()> {
+    use crate::chain::ethereum::{HttpRpc, poll, read_cursor, write_cursor};
+
+    let config_path = config::get_config_path(profile);
+    let cfg = Config::load(&config_path)?;
+    let eth = cfg.chains.ethereum.clone().ok_or_else(|| {
+        crate::error::LogHavenError::Config(
+            "no [chains.ethereum] section in the config; see docs/CONFIGURATION.md".into(),
+        )
+    })?;
+    config::validate_ethereum(&eth)?;
+    let cursor_path = config_path.with_file_name("ethereum.cursor");
+    let rpc = HttpRpc::new(&eth.rpc_url)?;
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        style::info(&format!(
+            "Watching {} address(es) as app '{}'; Ctrl+C to stop",
+            eth.addresses.len(),
+            eth.app
+        ));
+        let mut last_warning = String::new();
+        loop {
+            let step_fut = async {
+                let cursor = read_cursor(&cursor_path)?;
+                let batch = tokio::select! {
+                    _ = tokio::signal::ctrl_c() => return Ok(None),
+                    b = poll(&rpc, &eth, cursor) => b?,
+                };
+                // not cancellable: the cursor must follow a send that has started
+                if !batch.records.is_empty() {
+                    let mut client =
+                        crate::client::IngestClient::connect(&cfg, &eth.app, SESSION_TTL_SECS)
+                            .await?;
+                    client.send(&batch.records).await?;
+                    style::info(&format!("Recorded {} event(s)", batch.records.len()));
+                }
+                write_cursor(&cursor_path, batch.next_block)?;
+                Ok::<_, crate::error::LogHavenError>(Some(batch.more))
+            };
+            let step = match step_fut.await {
+                Ok(None) => return Ok(()),
+                Ok(Some(more)) => Ok(more),
+                Err(e) => Err(e),
+            };
+            let more = match step {
+                Ok(more) => {
+                    last_warning.clear();
+                    more
+                }
+                // the node or daemon may be down for a while; retry, saying each problem once
+                Err(e) => {
+                    if once {
+                        return Err(e);
+                    }
+                    let msg = e.to_string();
+                    if msg != last_warning {
+                        style::warning(&msg);
+                        last_warning = msg;
+                    }
+                    false
+                }
+            };
+            if once && !more {
+                return Ok(());
+            }
+            if !more {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => return Ok(()),
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(eth.poll_interval_secs)) => {}
+                }
+            }
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn poll_page(
     port: u16,
@@ -653,5 +805,29 @@ mod tests {
             Some("no-such-profile"),
         );
         assert!(matches!(r, Err(crate::error::LogHavenError::Config(m)) if m.contains("--follow")));
+    }
+
+    #[test]
+    fn trace_merge_orders_by_time_then_id_dedupes_and_keeps_newest() {
+        let mk = |ts: i64, id: &str| {
+            let mut r = crate::storage::record::LogRecord::new("web", "info", "s", "m");
+            r.timestamp_ms = ts;
+            r.id = id.into();
+            r
+        };
+        let input = || {
+            vec![
+                mk(20, "a"),
+                mk(10, "z"),
+                mk(10, "m"),
+                mk(10, "m"),
+                mk(30, "b"),
+            ]
+        };
+        let ids = |v: Vec<crate::storage::record::LogRecord>| {
+            v.into_iter().map(|r| r.id).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(merge_trace(input(), 10)), ["m", "z", "a", "b"]);
+        assert_eq!(ids(merge_trace(input(), 2)), ["a", "b"]);
     }
 }

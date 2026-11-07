@@ -40,3 +40,56 @@ Things worth trying:
 - `loghaven config auth.require_auth false` is not a CLI key; edit the config file to test plain ingest.
 - Data lands in `<data dir>/<app>/<YYYY-MM-DD>/*.parquet` (inspect with DuckDB: `select * from 'path/*.parquet'`).
 - Kill the daemon with `kill -9`, start it again: records flushed before the kill are still there.
+
+## Phase 2: `trace` and `watch ethereum`
+
+Use a throwaway `HOME` with a short path (the daemon's Unix socket path has a
+length limit, about 100 bytes on macOS): `export HOME=/tmp/lh-m`. Set
+`flush_interval_secs = 2` in `config.toml` to see records quickly.
+
+### `trace`
+
+```bash
+TX=0x$(printf 'ab%.0s' $(seq 32))
+loghaven send web "submit"  --chain ethereum --tx-hash $TX
+loghaven send api "indexed" --chain ethereum --tx-hash $TX
+loghaven trace $TX --app web --app api       # 2 rows, oldest first
+loghaven trace 0xAB...AB --app web           # upper-case hex still matches
+loghaven trace 0xdead --app web              # 0 records
+loghaven trace $TX --app web --app web       # no duplicate rows
+loghaven trace $TX --app web --app api --token x   # error: --token is for one app
+```
+
+### `watch ethereum` against the fake node
+
+```bash
+mkdir /tmp/lh-state && echo 1000 > /tmp/lh-state/head
+python3 scripts/mock_eth_node.py /tmp/lh-state &
+```
+
+Add to `config.toml` (and set `enabled = ["ethereum"]` in the existing `[chains]`):
+
+```toml
+[chains.ethereum]
+rpc_url = "http://127.0.0.1:18545/SECRETKEY"
+addresses = ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+start_block = 980
+max_block_range = 100
+```
+
+| Try | Expect |
+|-----|--------|
+| `loghaven watch ethereum --once` | `Recorded 2 event(s)`; `ethereum.cursor` is 995 |
+| the same again | nothing new; cursor unchanged |
+| `echo 1100 > /tmp/lh-state/head`, run again | 10 events, no repeats |
+| `echo 30 > /tmp/lh-state/maxspan` | still progresses, in smaller steps |
+| `echo 1 > /tmp/lh-state/reject` | error `block N cannot be read even alone`; cursor unchanged |
+| `echo 1 > /tmp/lh-state/nulltime` | error `block has no timestamp`; cursor unchanged |
+| `echo 1 > /tmp/lh-state/removed` | logs marked removed are not recorded |
+| `echo 1 > /tmp/lh-state/big` | event recorded with `data_truncated: true` in `metadata` (see the HTTP API) |
+| stop the mock node | error without the RPC URL (`SECRETKEY` never appears) |
+| `echo junk > ethereum.cursor` | error: not a block number |
+| `echo 99999999 > ethereum.cursor` | error: far ahead of the chain head |
+| stop the daemon | error reaching the query server; cursor unchanged |
+| `cat /tmp/lh-state/lastfilter.json` | the address list and, with `topics` set, `"topics": [[...]]` |
+| `loghaven trace 0x…03de --app ethereum` | the event for block 990 (`%064x` of 990) |

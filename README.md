@@ -17,7 +17,7 @@ A local-first, composable, chain-aware observability runtime for on-chain and of
 
 LogHaven is a daemon that runs on your machine. Your applications send it log records over a local UDP socket; it stores them as compressed Parquet files on your disk (optionally copying them to S3, R2 or MinIO) and serves them back through a local HTTP API and the `loghaven` CLI. Nothing leaves your machine unless you configure cloud sync, and there is no per-ingestion fee.
 
-Records can carry a `chain` and `tx_hash`, so on-chain activity and off-chain logs can be correlated (the correlation commands arrive in Phase 2).
+Records can carry a `chain` and `tx_hash`, so on-chain activity and off-chain logs can be correlated (see `loghaven trace`).
 
 **Today it gives you**
 
@@ -119,6 +119,8 @@ Every command accepts `--profile <NAME>` to use `<NAME>.toml` instead of `config
 | `loghaven auth public-key` | Print the path of the public key. |
 | `loghaven auth token <APP> [--ttl-secs N]` | Print a signed JWT for an app (default 3600 s, max 30 days). |
 | `loghaven send <APP> <MESSAGE> [options]` | Send records. Options: `--level` (default `info`), `--source` (default `cli`), `--count`, `--chain`, `--tx-hash`, `--trace-id`. |
+| `loghaven watch ethereum [--once]` | Poll Ethereum contract logs and record them as logs (settings in `[chains.ethereum]`, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#chainsethereum)). |
+| `loghaven trace <TX_HASH> --app <APP> [--app <APP>...]` | Show the records that carry one transaction hash, oldest first, merged across the apps you name. Options: `--from MS`, `--to MS`, `--limit` (default 1000: newest N per app and overall), `--token` (one app only). `0x`+hex hashes match ignoring case; other chains match exactly. |
 | `loghaven logs <APP> [options]` | Query records. Options: `--level`, `--source`, `--from MS`, `--to MS`, `--text`, `--limit` (default 100), `--token`, `--follow`. |
 
 Short aliases: `i` (init), `r` (run), `s` (status), `st` (stop).
@@ -131,6 +133,7 @@ loghaven logs web --level error --limit 20
 loghaven logs web --text timeout                 # case-insensitive, in message, tags and metadata
 loghaven logs web --from 1730000000000 --to 1730003600000   # unix milliseconds, inclusive
 loghaven logs web --follow --level error         # keep printing new matches; Ctrl+C to stop
+loghaven trace 0xabc...def --app web --app indexer   # one transaction across two apps
 ```
 
 Each line looks like `[timestamp_ms] level source | message chain=... tx=... trace=...`.
@@ -237,7 +240,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 |-------|-------|--------|
 | 0 - Foundation | Daemon, local storage, ingest, query API, auth, cloud sync | **Done** (v0.1, current) |
 | 1 - Usable end to end | Token CLI, client SDK, `send`, `logs --follow`, wire spec | **Done** (see [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md)) |
-| 2 - Chain awareness | Ethereum adapter, tx-hash correlation | **Next** |
+| 2 - Chain awareness | tx-hash correlation (`trace`), Ethereum adapter | **In progress**: `trace` and the Ethereum adapter done; Solana, Stellar and WebSocket next |
 | 3 - Interfaces | TUI, dashboard | Planned |
 | 4 - Production hardening | Client-side encryption, multi-backend, persistent sessions, license | Planned |
 
@@ -261,8 +264,8 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 
 ### Phase 2 - Chain awareness
 
-- Ethereum adapter (RPC and WebSocket), normalized event format
-- Correlate on-chain transactions with off-chain logs by `tx_hash` (`loghaven trace <tx>`)
+- Done: `GET /logs?tx_hash=` and `loghaven trace <tx> --app ...` correlate records by transaction hash across apps. A trace without `--from`/`--to` scans every chunk of each app, so it can be slow on large data sets.
+- Done: Ethereum adapter (`loghaven watch ethereum`): HTTP polling of `eth_getLogs` for configured contracts, confirmation depth, persisted cursor, normalized records. WebSocket subscriptions are not built yet.
 - Solana and Stellar adapters behind the same interface
 
 ### Phase 3 - Interfaces

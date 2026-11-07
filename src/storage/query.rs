@@ -18,6 +18,8 @@ pub struct QueryFilter {
     pub to_ms: Option<i64>,
     /// Case-insensitive substring match on message, tags and metadata.
     pub text: Option<String>,
+    /// Exact match, except that a `0x`+hex value (EVM) ignores ASCII case.
+    pub tx_hash: Option<String>,
     pub limit: usize,
 }
 
@@ -30,9 +32,17 @@ impl Default for QueryFilter {
             from_ms: None,
             to_ms: None,
             text: None,
+            tx_hash: None,
             limit: 1000,
         }
     }
+}
+
+/// EVM hashes are hex, so `0xABC` and `0xabc` name the same transaction.
+/// Other chains (base58 and similar) are case-sensitive.
+pub fn is_evm_hash(h: &str) -> bool {
+    h.strip_prefix("0x")
+        .is_some_and(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// Returns up to `filter.limit` matching records, newest first.
@@ -214,6 +224,7 @@ fn read_parquet_file(
     text_lc: Option<&str>,
 ) -> Result<Vec<LogRecord>> {
     let (from_ms, to_ms) = (filter.from_ms, filter.to_ms);
+    let evm_fold = filter.tx_hash.as_deref().is_some_and(is_evm_hash);
     let file = File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| LogHavenError::Storage(e.to_string()))?;
@@ -266,6 +277,19 @@ fn read_parquet_file(
             };
             if !eq_or_empty(sources, &filter.source) || !eq_or_empty(levels, &filter.level) {
                 continue;
+            }
+            if let Some(want) = &filter.tx_hash {
+                let hit = tx_hashes.is_some_and(|a| {
+                    !a.is_null(row)
+                        && if evm_fold {
+                            a.value(row).eq_ignore_ascii_case(want)
+                        } else {
+                            a.value(row) == want
+                        }
+                });
+                if !hit {
+                    continue;
+                }
             }
             if let Some(needle) = text_lc {
                 let in_str = |a: Option<&StringArray>| {
@@ -364,6 +388,44 @@ mod tests {
 
     fn msgs(v: &[LogRecord]) -> Vec<&str> {
         v.iter().map(|r| r.message.as_str()).collect()
+    }
+
+    #[test]
+    fn tx_hash_filter_is_exact_and_skips_records_without_one() {
+        let mut fx = Fixture::new("txhash");
+        let with_tx = |ts, msg: &str, tx: &str| {
+            let mut r = rec(ts, msg);
+            r.chain = Some("ethereum".into());
+            r.tx_hash = Some(tx.into());
+            r
+        };
+        fx.chunk(
+            "web",
+            vec![
+                with_tx(T0, "submitted", "0xabc"),
+                rec(T0 + 1, "no tx"),
+                with_tx(T0 + 2, "other", "0xabcd"),
+                with_tx(T0 + 3, "confirmed", "0xabc"),
+                with_tx(T0 + 4, "upper", "0xABC"),
+                with_tx(T0 + 5, "sol", "AbC9"),
+                with_tx(T0 + 6, "sol lower", "abc9"),
+            ],
+        );
+        let got = fx.q(QueryFilter {
+            tx_hash: Some("0xabc".into()),
+            ..filter()
+        });
+        assert_eq!(msgs(&got), ["upper", "confirmed", "submitted"]);
+        let sol = fx.q(QueryFilter {
+            tx_hash: Some("AbC9".into()),
+            ..filter()
+        });
+        assert_eq!(msgs(&sol), ["sol"]);
+        let none = fx.q(QueryFilter {
+            tx_hash: Some("0xdead".into()),
+            ..filter()
+        });
+        assert!(none.is_empty());
     }
 
     #[test]

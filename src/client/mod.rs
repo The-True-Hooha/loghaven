@@ -14,7 +14,11 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 
 /// Largest UDP payload on IPv4 (65535 - 8 UDP header - 20 IP header).
+#[cfg(not(target_vendor = "apple"))]
 const MAX_DATAGRAM: usize = 65507;
+/// macOS refuses larger datagrams with EMSGSIZE (`net.inet.udp.maxdgram` is 9216).
+#[cfg(target_vendor = "apple")]
+const MAX_DATAGRAM: usize = 9000;
 /// Room for `token_id:counter:hmac\n` (64 + 1 + 20 + 1 + 64 + 1 bytes).
 const HEADER_RESERVE: usize = 160;
 const MAX_PAYLOAD: usize = MAX_DATAGRAM - HEADER_RESERVE;
@@ -289,6 +293,18 @@ mod tests {
         assert_eq!(parsed.records[0].message, r.message);
         assert_eq!(parsed.records[0].tx_hash.as_deref(), Some("0xabc"));
         assert_eq!(parsed.records[1].trace_id, None);
+    }
+
+    #[tokio::test]
+    async fn a_large_batch_is_accepted_by_the_os_socket() {
+        let sink = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = sink.local_addr().unwrap().port();
+        let mut client = IngestClient::unauthenticated(port, "web").await.unwrap();
+        let records: Vec<_> = (0..2000)
+            .map(|i| rec(&format!("{i}-{}", "x".repeat(500))))
+            .collect();
+        let sent = client.send(&records).await.unwrap();
+        assert!(sent > 1);
     }
 
     #[test]

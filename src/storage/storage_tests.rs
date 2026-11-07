@@ -2,7 +2,7 @@ use crate::config::LocalStorageConfig;
 use crate::storage::local::LocalBackend;
 use crate::storage::query::{QueryFilter, query};
 use crate::storage::record::{LogRecord, log_schema, records_to_batch};
-use crate::storage::writer::ChunkWriter;
+use crate::storage::writer::write_chunk;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -22,48 +22,46 @@ fn make_record(app: &str, level: &str, source: &str, msg: &str) -> LogRecord {
 }
 
 #[test]
-fn chunk_writer_creates_file() {
+fn write_chunk_creates_file_and_parent_dirs() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("test.parquet");
-    let mut w = ChunkWriter::new(path.clone()).unwrap();
-    let records = vec![make_record("app1", "info", "svc", "hello")];
-    w.write_batch(&records).unwrap();
-    w.finish().unwrap();
-    assert!(path.exists());
+    let path = dir.path().join("nested").join("day").join("test.parquet");
+    write_chunk(&path, &[make_record("app1", "info", "svc", "hello")]).unwrap();
     assert!(std::fs::metadata(&path).unwrap().len() > 0);
+    assert!(
+        !path.with_extension("parquet.tmp").exists(),
+        "no tmp file left behind"
+    );
 }
 
 #[test]
-fn chunk_writer_empty_batch_noop() {
+fn write_chunk_round_trips_record_count() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("empty.parquet");
-    let mut w = ChunkWriter::new(path.clone()).unwrap();
-    w.write_batch(&[]).unwrap();
-    w.finish().unwrap();
-}
-
-#[test]
-fn chunk_writer_record_count() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("count.parquet");
-    let mut w = ChunkWriter::new(path).unwrap();
-    let records: Vec<_> = (0..5).map(|i| make_record("app", "info", "svc", &format!("msg {}", i))).collect();
-    w.write_batch(&records).unwrap();
-    assert_eq!(w.record_count, 5);
-    w.finish().unwrap();
+    let app = "countapp";
+    let path = dir
+        .path()
+        .join(app)
+        .join(crate::storage::date::today())
+        .join("count.parquet");
+    let records: Vec<_> = (0..5)
+        .map(|i| make_record(app, "info", "svc", &format!("msg {}", i)))
+        .collect();
+    write_chunk(&path, &records).unwrap();
+    let filter = QueryFilter {
+        app: app.to_string(),
+        ..Default::default()
+    };
+    assert_eq!(query(dir.path(), &filter).unwrap().len(), 5);
 }
 
 fn write_parquet(path: PathBuf, records: &[LogRecord]) {
-    let mut w = ChunkWriter::new(path).unwrap();
-    w.write_batch(records).unwrap();
-    w.finish().unwrap();
+    write_chunk(&path, records).unwrap();
 }
 
 #[test]
 fn query_scans_parquet_and_returns_records() {
     let dir = TempDir::new().unwrap();
     let app = "myapp";
-    let date = crate::storage::local::current_date();
+    let date = crate::storage::date::today();
     let chunk_dir = dir.path().join(app).join(&date);
     std::fs::create_dir_all(&chunk_dir).unwrap();
 
@@ -77,7 +75,7 @@ fn query_scans_parquet_and_returns_records() {
         app: app.to_string(),
         ..Default::default()
     };
-    let results = query(&dir.path().to_path_buf(), &filter, None).unwrap();
+    let results = query(dir.path(), &filter).unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -85,7 +83,7 @@ fn query_scans_parquet_and_returns_records() {
 fn query_filters_by_level() {
     let dir = TempDir::new().unwrap();
     let app = "filterapp";
-    let date = crate::storage::local::current_date();
+    let date = crate::storage::date::today();
     let chunk_dir = dir.path().join(app).join(&date);
     std::fs::create_dir_all(&chunk_dir).unwrap();
 
@@ -101,7 +99,7 @@ fn query_filters_by_level() {
         level: Some("error".to_string()),
         ..Default::default()
     };
-    let results = query(&dir.path().to_path_buf(), &filter, None).unwrap();
+    let results = query(dir.path(), &filter).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].level, "error");
 }
@@ -110,7 +108,7 @@ fn query_filters_by_level() {
 fn query_filters_by_source() {
     let dir = TempDir::new().unwrap();
     let app = "srcapp";
-    let date = crate::storage::local::current_date();
+    let date = crate::storage::date::today();
     let chunk_dir = dir.path().join(app).join(&date);
     std::fs::create_dir_all(&chunk_dir).unwrap();
 
@@ -125,7 +123,7 @@ fn query_filters_by_source() {
         source: Some("worker".to_string()),
         ..Default::default()
     };
-    let results = query(&dir.path().to_path_buf(), &filter, None).unwrap();
+    let results = query(dir.path(), &filter).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].source, "worker");
 }
@@ -134,11 +132,13 @@ fn query_filters_by_source() {
 fn query_respects_limit() {
     let dir = TempDir::new().unwrap();
     let app = "limitapp";
-    let date = crate::storage::local::current_date();
+    let date = crate::storage::date::today();
     let chunk_dir = dir.path().join(app).join(&date);
     std::fs::create_dir_all(&chunk_dir).unwrap();
 
-    let records: Vec<_> = (0..20).map(|i| make_record(app, "info", "svc", &format!("msg {}", i))).collect();
+    let records: Vec<_> = (0..20)
+        .map(|i| make_record(app, "info", "svc", &format!("msg {}", i)))
+        .collect();
     write_parquet(chunk_dir.join("00000.parquet"), &records);
 
     let filter = QueryFilter {
@@ -146,7 +146,7 @@ fn query_respects_limit() {
         limit: 5,
         ..Default::default()
     };
-    let results = query(&dir.path().to_path_buf(), &filter, None).unwrap();
+    let results = query(dir.path(), &filter).unwrap();
     assert_eq!(results.len(), 5);
 }
 
@@ -157,10 +157,9 @@ fn query_returns_empty_for_missing_app() {
         app: "nonexistent".to_string(),
         ..Default::default()
     };
-    let results = query(&dir.path().to_path_buf(), &filter, None).unwrap();
+    let results = query(dir.path(), &filter).unwrap();
     assert!(results.is_empty());
 }
-
 
 #[tokio::test]
 async fn local_backend_write_and_read_back() {
@@ -169,7 +168,15 @@ async fn local_backend_write_and_read_back() {
     let backend = LocalBackend::new("testapp".to_string(), &config).unwrap();
 
     for i in 0..5 {
-        backend.write(make_record("testapp", "info", "svc", &format!("log line {}", i))).await.unwrap();
+        backend
+            .write(make_record(
+                "testapp",
+                "info",
+                "svc",
+                &format!("log line {}", i),
+            ))
+            .await
+            .unwrap();
     }
     backend.shutdown().await.unwrap();
 
@@ -178,7 +185,7 @@ async fn local_backend_write_and_read_back() {
         limit: 100,
         ..Default::default()
     };
-    let results = query(&dir.path().to_path_buf(), &filter, None).unwrap();
+    let results = query(dir.path(), &filter).unwrap();
     assert_eq!(results.len(), 5);
 }
 
@@ -188,14 +195,17 @@ async fn local_backend_shutdown_flushes_buffer() {
     let config = temp_config(&dir);
     let backend = LocalBackend::new("flushapp".to_string(), &config).unwrap();
 
-    backend.write(make_record("flushapp", "warn", "svc", "buffered")).await.unwrap();
+    backend
+        .write(make_record("flushapp", "warn", "svc", "buffered"))
+        .await
+        .unwrap();
     backend.shutdown().await.unwrap();
 
     let filter = QueryFilter {
         app: "flushapp".to_string(),
         ..Default::default()
     };
-    let results = query(&dir.path().to_path_buf(), &filter, None).unwrap();
+    let results = query(dir.path(), &filter).unwrap();
     assert_eq!(results.len(), 1);
 }
 
@@ -224,7 +234,7 @@ fn records_to_batch_handles_null_optional_fields() {
 #[test]
 fn records_to_batch_multiple_records() {
     let records: Vec<_> = (0..100)
-        .map(|i| LogRecord::new("app", "info", "svc", &format!("msg {}", i)))
+        .map(|i| LogRecord::new("app", "info", "svc", format!("msg {}", i)))
         .collect();
     let batch = records_to_batch(&records).unwrap();
     assert_eq!(batch.num_rows(), 100);
@@ -234,7 +244,7 @@ fn records_to_batch_multiple_records() {
 fn query_filters_by_time_range() {
     let dir = TempDir::new().unwrap();
     let app = "timeapp";
-    let date = crate::storage::local::current_date();
+    let date = crate::storage::date::today();
     let chunk_dir = dir.path().join(app).join(&date);
     std::fs::create_dir_all(&chunk_dir).unwrap();
 
@@ -256,7 +266,7 @@ fn query_filters_by_time_range() {
         to_ms: Some(now),
         ..Default::default()
     };
-    let results = query(&dir.path().to_path_buf(), &filter, None).unwrap();
+    let results = query(dir.path(), &filter).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].message, "recent log");
 }
@@ -265,32 +275,51 @@ fn query_filters_by_time_range() {
 fn query_reads_multiple_chunk_files() {
     let dir = TempDir::new().unwrap();
     let app = "multiapp";
-    let date = crate::storage::local::current_date();
+    let date = crate::storage::date::today();
     let chunk_dir = dir.path().join(app).join(&date);
     std::fs::create_dir_all(&chunk_dir).unwrap();
 
-    write_parquet(chunk_dir.join("00000.parquet"), &[make_record(app, "info", "svc", "chunk 0")]);
-    write_parquet(chunk_dir.join("00001.parquet"), &[make_record(app, "info", "svc", "chunk 1")]);
-    write_parquet(chunk_dir.join("00002.parquet"), &[make_record(app, "info", "svc", "chunk 2")]);
+    write_parquet(
+        chunk_dir.join("00000.parquet"),
+        &[make_record(app, "info", "svc", "chunk 0")],
+    );
+    write_parquet(
+        chunk_dir.join("00001.parquet"),
+        &[make_record(app, "info", "svc", "chunk 1")],
+    );
+    write_parquet(
+        chunk_dir.join("00002.parquet"),
+        &[make_record(app, "info", "svc", "chunk 2")],
+    );
 
-    let filter = QueryFilter { app: app.to_string(), limit: 100, ..Default::default() };
-    let results = query(&dir.path().to_path_buf(), &filter, None).unwrap();
+    let filter = QueryFilter {
+        app: app.to_string(),
+        limit: 100,
+        ..Default::default()
+    };
+    let results = query(dir.path(), &filter).unwrap();
     assert_eq!(results.len(), 3);
 }
 
 #[test]
 fn query_isolates_apps() {
     let dir = TempDir::new().unwrap();
-    let date = crate::storage::local::current_date();
+    let date = crate::storage::date::today();
 
     for app in ["app_a", "app_b"] {
         let chunk_dir = dir.path().join(app).join(&date);
         std::fs::create_dir_all(&chunk_dir).unwrap();
-        write_parquet(chunk_dir.join("00000.parquet"), &[make_record(app, "info", "svc", "log")]);
+        write_parquet(
+            chunk_dir.join("00000.parquet"),
+            &[make_record(app, "info", "svc", "log")],
+        );
     }
 
-    let filter = QueryFilter { app: "app_a".to_string(), ..Default::default() };
-    let results = query(&dir.path().to_path_buf(), &filter, None).unwrap();
+    let filter = QueryFilter {
+        app: "app_a".to_string(),
+        ..Default::default()
+    };
+    let results = query(dir.path(), &filter).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].app, "app_a");
 }
@@ -303,18 +332,35 @@ async fn local_backend_isolates_apps() {
     let backend_a = LocalBackend::new("app_a".to_string(), &config).unwrap();
     let backend_b = LocalBackend::new("app_b".to_string(), &config).unwrap();
 
-    backend_a.write(make_record("app_a", "info", "svc", "from a")).await.unwrap();
-    backend_a.write(make_record("app_a", "info", "svc", "also from a")).await.unwrap();
-    backend_b.write(make_record("app_b", "info", "svc", "from b")).await.unwrap();
+    backend_a
+        .write(make_record("app_a", "info", "svc", "from a"))
+        .await
+        .unwrap();
+    backend_a
+        .write(make_record("app_a", "info", "svc", "also from a"))
+        .await
+        .unwrap();
+    backend_b
+        .write(make_record("app_b", "info", "svc", "from b"))
+        .await
+        .unwrap();
 
     backend_a.shutdown().await.unwrap();
     backend_b.shutdown().await.unwrap();
 
-    let filter_a = QueryFilter { app: "app_a".to_string(), limit: 100, ..Default::default() };
-    let filter_b = QueryFilter { app: "app_b".to_string(), limit: 100, ..Default::default() };
+    let filter_a = QueryFilter {
+        app: "app_a".to_string(),
+        limit: 100,
+        ..Default::default()
+    };
+    let filter_b = QueryFilter {
+        app: "app_b".to_string(),
+        limit: 100,
+        ..Default::default()
+    };
 
-    let res_a = query(&dir.path().to_path_buf(), &filter_a, None).unwrap();
-    let res_b = query(&dir.path().to_path_buf(), &filter_b, None).unwrap();
+    let res_a = query(dir.path(), &filter_a).unwrap();
+    let res_b = query(dir.path(), &filter_b).unwrap();
 
     assert_eq!(res_a.len(), 2);
     assert_eq!(res_b.len(), 1);

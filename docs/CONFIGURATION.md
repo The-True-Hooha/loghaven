@@ -119,9 +119,59 @@ readable only by you (`chmod 600`).
 enabled = []               # "ethereum" | "solana" | "stellar"
 ```
 
-Chain adapters arrive in Phase 2. The section is validated (an enabled chain
-needs its own settings block) but nothing is monitored yet. Records can already
-carry `chain` and `tx_hash` fields from your own applications.
+### `[chains.ethereum]`
+
+```toml
+[chains]
+enabled = ["ethereum"]
+
+[chains.ethereum]
+rpc_url = "https://eth-mainnet.example/KEY"   # http(s) JSON-RPC endpoint
+app = "ethereum"                # app the events are recorded under (default)
+addresses = ["0x..."]           # contracts to watch, 0x + 40 hex; at least one
+topics = []                     # optional event signature hashes (topic0), any matches
+poll_interval_secs = 12         # wait between polls once caught up
+confirmations = 6               # only blocks this far behind the head are read
+max_block_range = 1000          # largest eth_getLogs span (1 to 10000)
+# start_block = 21000000        # first run only; default is the newest confirmed block
+```
+
+Run it with `loghaven watch ethereum` (the daemon must be running). It is a
+separate process: stop it with Ctrl+C. `--once` reads what is available and
+exits.
+
+How it behaves:
+
+- Each log becomes a record with `chain = "ethereum"`, `source = "ethereum"` and
+  the transaction hash set, so `loghaven trace <tx> --app ethereum --app web`
+  lines it up with your own logs. Address, topics, data, block number, block
+  time and log index are in `metadata`.
+- The record timestamp is the time it was ingested, not the block time. The
+  block time is `metadata.block_timestamp` (unix seconds).
+- The next block to read is kept in `ethereum.cursor` next to `config.toml`.
+  Delete it to start again from `start_block`. A cursor file that is not a
+  block number, or one far ahead of the chain head (wrong node or chain), stops
+  the watcher with an error instead of guessing.
+- Delivery is best effort. With auth on, the watcher stops with an error and
+  keeps its cursor when the daemon cannot be reached. Once datagrams are sent
+  over UDP, a record the daemon drops (for example because it crashed right
+  then) is not re-sent. A crash or error between sending and saving the cursor
+  can send the same events again, so a trace may show an event twice.
+- `confirmations` is the only reorg protection. A reorg deeper than that is not
+  corrected, and `confirmations = 0` has no protection at all. Logs the node
+  marks as removed are skipped.
+- Event `data` longer than 4096 hex characters is cut in `metadata.data`;
+  `metadata.data_len` has the full length and `metadata.data_truncated` is set.
+- If the node refuses a range because it matches too many logs, the watcher
+  retries on half the span, down to one block. A single block the node still
+  refuses stops the watcher with an error naming that block.
+- Adding an address later does not backfill it: the cursor is not tied to the
+  address list. Delete the cursor and set `start_block` to re-read history.
+- `ws_url` is accepted but unused; the adapter polls over HTTP.
+- If your node rejects a range because it holds too many logs, lower
+  `max_block_range`.
+- The RPC URL is never printed in errors, because it often contains an API key.
+  It is stored in plain text in `config.toml`.
 
 ## Environment variables
 
@@ -139,5 +189,5 @@ carry `chain` and `tx_hash` fields from your own applications.
 | Query `limit` | 1 to 10000 (HTTP default 1000, CLI default 100) |
 | Query result size | about 64 MiB, 4 concurrent queries, 30 s timeout |
 | Sessions per app | 32 (oldest evicted) |
-| Datagram size | one UDP packet (65507 bytes including the auth header) |
+| Datagram size | one UDP packet (65507 bytes including the auth header; 9000 for the Rust client on macOS) |
 | Records held in memory when the disk is failing | 100000 records or 256 MiB, oldest dropped first |
