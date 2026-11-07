@@ -11,7 +11,7 @@
 
 A local-first, composable, chain-aware observability runtime for on-chain and off-chain systems.
 
-> **Status: pre-1.0.** Phases 0 (foundation) and 1 (usable end to end) are done. Chain adapters, TUI and dashboard are not built yet. See the [roadmap](#roadmap).
+> **Status: pre-1.0.** Phases 0 (foundation) and 1 (usable end to end) are done, and Phase 2 (chain awareness) has started: transaction tracing and an Ethereum adapter are in v0.2. Solana and Stellar adapters, the TUI and the dashboard are not built yet. See the [roadmap](#roadmap).
 
 ## What it is
 
@@ -238,9 +238,9 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 
 | Phase | Theme | Status |
 |-------|-------|--------|
-| 0 - Foundation | Daemon, local storage, ingest, query API, auth, cloud sync | **Done** (v0.1, current) |
-| 1 - Usable end to end | Token CLI, client SDK, `send`, `logs --follow`, wire spec | **Done** (see [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md)) |
-| 2 - Chain awareness | tx-hash correlation (`trace`), Ethereum adapter | **In progress**: `trace` and the Ethereum adapter done; Solana, Stellar and WebSocket next |
+| 0 - Foundation | Daemon, local storage, ingest, query API, auth, cloud sync | **Done** (v0.1) |
+| 1 - Usable end to end | Token CLI, client SDK, `send`, `logs --follow`, wire spec | **Done** (v0.2, see [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md)) |
+| 2 - Chain awareness | tx-hash correlation (`trace`), Ethereum adapter | **In progress**: `trace` and the Ethereum adapter shipped in v0.2; Solana, Stellar and WebSocket next |
 | 3 - Interfaces | TUI, dashboard | Planned |
 | 4 - Production hardening | Client-side encryption, multi-backend, persistent sessions, license | Planned |
 
