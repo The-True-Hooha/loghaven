@@ -21,6 +21,7 @@ struct Mock {
     txs: BTreeMap<u64, Value>,
     genesis: String,
     fail_tx: bool,
+    max_page: usize,
     calls: RefCell<Vec<(String, Value)>>,
 }
 
@@ -31,6 +32,7 @@ impl Mock {
             txs: BTreeMap::new(),
             genesis: GENESIS.into(),
             fail_tx: false,
+            max_page: usize::MAX,
             calls: RefCell::new(vec![]),
         }
     }
@@ -102,7 +104,7 @@ impl Rpc for Mock {
                         .position(|(n, _)| *n == Self::number(u))
                         .unwrap_or(list.len())
                 });
-                let limit = opts["limit"].as_u64().unwrap() as usize;
+                let limit = (opts["limit"].as_u64().unwrap() as usize).min(self.max_page);
                 let page: Vec<Value> = list[start.min(end)..end]
                     .iter()
                     .take(limit)
@@ -147,10 +149,17 @@ fn block_on<T>(f: impl std::future::Future<Output = T>) -> T {
         .block_on(f)
 }
 
+fn mark(n: u64) -> Mark {
+    Mark {
+        signature: sig(n),
+        slot: 1000 + n,
+    }
+}
+
 fn cursor_at(addr: &str, n: u64) -> Cursor {
     Cursor {
         binding: "b".into(),
-        last: BTreeMap::from([(addr.to_string(), sig(n))]),
+        last: BTreeMap::from([(addr.to_string(), mark(n))]),
     }
 }
 
@@ -163,7 +172,7 @@ fn first_run_starts_at_the_tip_and_records_nothing() {
     let rpc = Mock::new().with(ADDR, 1..=50);
     let b = block_on(poll(&rpc, &cfg(), None)).unwrap();
     assert!(b.records.is_empty());
-    assert_eq!(b.last[ADDR], sig(50));
+    assert_eq!(b.last[ADDR].signature, sig(50));
     assert_eq!(rpc.count("getTransaction"), 0);
 }
 
@@ -182,7 +191,7 @@ fn new_transactions_are_recorded_oldest_first_with_the_signature_as_tx_hash() {
         .failed(ADDR, 52);
     let b = block_on(poll(&rpc, &cfg(), Some(&cursor_at(ADDR, 50)))).unwrap();
     assert_eq!(hashes(&b), [sig(51), sig(52), sig(53)]);
-    assert_eq!(b.last[ADDR], sig(53));
+    assert_eq!(b.last[ADDR].signature, sig(53));
     assert!(!b.more);
 
     let r = &b.records[0];
@@ -216,7 +225,7 @@ fn caught_up_records_nothing_and_keeps_the_cursor() {
     let rpc = Mock::new().with(ADDR, 1..=50);
     let b = block_on(poll(&rpc, &cfg(), Some(&cursor_at(ADDR, 50)))).unwrap();
     assert!(b.records.is_empty() && !b.more);
-    assert_eq!(b.last[ADDR], sig(50));
+    assert_eq!(b.last[ADDR].signature, sig(50));
 }
 
 #[test]
@@ -317,7 +326,7 @@ fn program_logs_are_cut_to_a_budget_that_keeps_the_datagram_small() {
     assert_eq!(m["logs_truncated"], true);
     assert_eq!(m["log_count"], 202);
     assert_eq!(m["logs"][0].as_str().unwrap().len(), MAX_LOG_LINE);
-    assert!(serde_json::to_vec(&b.records[0]).unwrap().len() < 8_000);
+    assert!(serde_json::to_vec(&b.records[0]).unwrap().len() < 9_000 - 1_000);
 }
 
 #[test]
@@ -329,14 +338,14 @@ fn a_transaction_touching_two_watched_addresses_is_recorded_once() {
     };
     let cur = Cursor {
         binding: "b".into(),
-        last: BTreeMap::from([(ADDR.into(), sig(0)), (ADDR2.into(), sig(1))]),
+        last: BTreeMap::from([(ADDR.into(), mark(0)), (ADDR2.into(), mark(1))]),
     };
     let b = block_on(poll(&rpc, &c, Some(&cur))).unwrap();
     let mut got = hashes(&b);
     got.sort();
     assert_eq!(got, [sig(1), sig(2), sig(3)]);
-    assert_eq!(b.last[ADDR], sig(2));
-    assert_eq!(b.last[ADDR2], sig(3));
+    assert_eq!(b.last[ADDR].signature, sig(2));
+    assert_eq!(b.last[ADDR2].signature, sig(3));
 }
 
 #[test]
@@ -365,19 +374,22 @@ fn a_malformed_signature_from_the_node_is_an_error_not_a_cursor() {
 fn cursor_text_round_trips_and_garbage_is_an_error() {
     let c = Cursor {
         binding: "abc".into(),
-        last: BTreeMap::from([(ADDR.into(), sig(7)), (ADDR2.into(), sig(8))]),
+        last: BTreeMap::from([(ADDR.into(), mark(7)), (ADDR2.into(), mark(8))]),
     };
     let back = Cursor::parse(&c.render()).unwrap();
     assert_eq!((back.binding.as_str(), back.last), ("abc", c.last));
     assert!(Cursor::parse("abc\n").unwrap().last.is_empty());
-    let short_sig = format!("abc\n{ADDR} abc\n");
-    let three = format!("abc\n{ADDR} {} extra\n", sig(1));
-    let bad_addr = format!("abc\n0OIl {}\n", sig(1));
+    let short_sig = format!("abc\n{ADDR} abc 5\n");
+    let no_slot = format!("abc\n{ADDR} {}\n", sig(1));
+    let bad_slot = format!("abc\n{ADDR} {} x\n", sig(1));
+    let three = format!("abc\n{ADDR} {} 5 extra\n", sig(1));
+    let bad_addr = format!("abc\n0OIl {} 5\n", sig(1));
     for bad in [
         "",
-        "
-",
+        "\n",
         short_sig.as_str(),
+        no_slot.as_str(),
+        bad_slot.as_str(),
         three.as_str(),
         bad_addr.as_str(),
     ] {
@@ -428,12 +440,15 @@ fn watcher_starts_at_the_tip_then_follows_with_a_cursor_it_wrote() {
     let first = block_on(w.step(None)).unwrap();
     assert!(first.records.is_empty());
     let saved = Cursor::parse(&first.cursor).unwrap();
-    assert_eq!(saved.last[ADDR], sig(5));
+    assert_eq!(saved.last[ADDR].signature, sig(5));
 
     let mut w = SolanaWatcher::with_rpc(Mock::new().with(ADDR, 1..=7), cfg());
     let next = block_on(w.step(Some(&first.cursor))).unwrap();
     assert_eq!(next.records.len(), 2);
-    assert_eq!(Cursor::parse(&next.cursor).unwrap().last[ADDR], sig(7));
+    assert_eq!(
+        Cursor::parse(&next.cursor).unwrap().last[ADDR].signature,
+        sig(7)
+    );
 }
 
 #[test]
@@ -466,4 +481,46 @@ fn validation_rejects_bad_settings() {
     assert!(c(&|s| s.max_signatures = 0));
     assert!(c(&|s| s.max_signatures = 1_001));
     assert!(c(&|s| s.app = "../x".into()));
+}
+
+#[test]
+fn a_node_that_clamps_the_page_size_loses_nothing() {
+    let mut rpc = Mock::new().with(ADDR, 1..=250);
+    rpc.max_page = 100;
+    let c = SolanaConfig {
+        max_signatures: 1_000,
+        ..cfg()
+    };
+    let b = block_on(poll(&rpc, &c, Some(&cursor_at(ADDR, 0)))).unwrap();
+    assert_eq!(hashes(&b), (1..=250).map(sig).collect::<Vec<_>>());
+    assert!(b.records.iter().all(|r| r.level != "warn"));
+}
+
+#[test]
+fn a_saved_signature_the_node_does_not_know_is_retried_not_replayed() {
+    // the node lists history older than the cursor because it never heard of the signature
+    let rpc = Mock::new().with(ADDR, 1..=60);
+    let ahead = Cursor {
+        binding: "b".into(),
+        last: BTreeMap::from([(
+            ADDR.to_string(),
+            Mark {
+                signature: sig(9_999),
+                slot: 1000 + 9_999,
+            },
+        )]),
+    };
+    let e = block_on(poll(&rpc, &cfg(), Some(&ahead))).err().unwrap();
+    assert!(matches!(e, LogHavenError::Daemon(_)), "retryable: {e}");
+    assert!(e.to_string().contains("does not know"), "{e}");
+    assert_eq!(rpc.count("getTransaction"), 0);
+}
+
+#[test]
+fn a_null_meta_counts_as_no_logs() {
+    let mut rpc = Mock::new().with(ADDR, 1..=1);
+    rpc.txs.insert(1, json!({"slot": 1001, "meta": null}));
+    let b = block_on(poll(&rpc, &cfg(), Some(&cursor_at(ADDR, 0)))).unwrap();
+    let m = b.records[0].metadata.as_ref().unwrap();
+    assert_eq!(m["logs_available"], false);
 }

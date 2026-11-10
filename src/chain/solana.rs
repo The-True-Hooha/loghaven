@@ -27,6 +27,14 @@ const MAX_LOG_LINE: usize = 512;
 const MAX_LOG_BYTES: usize = 4096;
 const MAX_ERR_CHARS: usize = 200;
 
+/// A recorded transaction the cursor points at. The slot lets a node that does not
+/// know the signature (lagging, or pruned past it) be told from a real backlog.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mark {
+    pub signature: String,
+    pub slot: u64,
+}
+
 struct SigInfo {
     signature: String,
     slot: u64,
@@ -86,24 +94,33 @@ async fn signatures(
 
 /// Transactions newer than `until`, oldest first. The flag is true when more than
 /// `MAX_BACKLOG` were waiting and the oldest ones were left out.
+///
+/// A node that does not know `until` ignores it and lists the newest history, so
+/// an entry older than the cursor's slot is an error to retry, not a backlog.
+/// Paging stops on an empty page, because a provider may return fewer than `PAGE`.
 async fn backlog(
     rpc: &impl Rpc,
     address: &str,
-    until: Option<&str>,
+    until: Option<&Mark>,
 ) -> Result<(Vec<SigInfo>, bool)> {
+    let until_sig = until.map(|m| m.signature.as_str());
     let mut out: Vec<SigInfo> = vec![];
     let mut skipped = false;
     loop {
         let before = out.last().map(|s| s.signature.clone());
-        let page = signatures(rpc, address, before.as_deref(), until, PAGE).await?;
-        let full = page.len() >= PAGE;
-        out.extend(page);
-        if !full {
+        let page = signatures(rpc, address, before.as_deref(), until_sig, PAGE).await?;
+        if page.is_empty() {
             break;
         }
+        if until.is_some_and(|m| page.iter().any(|i| i.slot < m.slot)) {
+            return Err(LogHavenError::Daemon(format!(
+                "rpc does not know the saved signature for {address} yet; retrying"
+            )));
+        }
+        out.extend(page);
         if out.len() >= MAX_BACKLOG {
             let before = out.last().map(|s| s.signature.clone());
-            skipped = !signatures(rpc, address, before.as_deref(), until, 1)
+            skipped = !signatures(rpc, address, before.as_deref(), until_sig, 1)
                 .await?
                 .is_empty();
             break;
@@ -152,7 +169,7 @@ fn bounded_logs(meta: &Value) -> (Vec<String>, usize, bool) {
 }
 
 fn to_record(address: &str, info: &SigInfo, tx: Option<&Value>) -> ClientRecord {
-    let meta = tx.and_then(|t| t.get("meta"));
+    let meta = tx.and_then(|t| t.get("meta")).filter(|m| !m.is_null());
     let (logs, log_count, logs_truncated) = meta.map_or((vec![], 0, false), bounded_logs);
     let outcome = if info.err.is_some() { "failed" } else { "ok" };
     ClientRecord {
@@ -195,7 +212,7 @@ fn gap_record(address: &str) -> ClientRecord {
 pub struct Batch {
     pub records: Vec<ClientRecord>,
     /// Newest recorded signature per address, to save once `records` are sent.
-    pub last: BTreeMap<String, String>,
+    pub last: BTreeMap<String, Mark>,
     /// True when an address has more waiting than `max_signatures`.
     pub more: bool,
 }
@@ -212,12 +229,18 @@ pub async fn poll(rpc: &impl Rpc, cfg: &SolanaConfig, saved: Option<&Cursor>) ->
     for address in addresses {
         let Some(saved) = saved else {
             if let Some(tip) = signatures(rpc, address, None, None, 1).await?.pop() {
-                last.insert(address.clone(), tip.signature);
+                last.insert(
+                    address.clone(),
+                    Mark {
+                        signature: tip.signature,
+                        slot: tip.slot,
+                    },
+                );
             }
             continue;
         };
         let until = saved.last.get(address);
-        let (pending, skipped) = backlog(rpc, address, until.map(String::as_str)).await?;
+        let (pending, skipped) = backlog(rpc, address, until).await?;
         if skipped {
             records.push(gap_record(address));
         }
@@ -230,7 +253,14 @@ pub async fn poll(rpc: &impl Rpc, cfg: &SolanaConfig, saved: Option<&Cursor>) ->
                 records.push(to_record(address, info, tx.as_ref()));
             }
         }
-        if let Some(newest) = take.last().map(|i| i.signature.clone()).or(until.cloned()) {
+        let newest = take
+            .last()
+            .map(|i| Mark {
+                signature: i.signature.clone(),
+                slot: i.slot,
+            })
+            .or(until.cloned());
+        if let Some(newest) = newest {
             last.insert(address.clone(), newest);
         }
     }
@@ -244,7 +274,7 @@ pub async fn poll(rpc: &impl Rpc, cfg: &SolanaConfig, saved: Option<&Cursor>) ->
 pub struct Cursor {
     /// What the cursor was saved for: the cluster and the watched addresses.
     pub binding: String,
-    pub last: BTreeMap<String, String>,
+    pub last: BTreeMap<String, Mark>,
 }
 
 impl Cursor {
@@ -263,9 +293,18 @@ impl Cursor {
         let mut last = BTreeMap::new();
         for line in lines.filter(|l| !l.trim().is_empty()) {
             let mut parts = line.split_whitespace();
-            match (parts.next(), parts.next(), parts.next()) {
-                (Some(a), Some(s), None) if is_base58(a, 32, 44) && is_base58(s, 64, 90) => {
-                    last.insert(a.to_string(), s.to_string());
+            match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                (Some(a), Some(sig), Some(slot), None)
+                    if is_base58(a, 32, 44) && is_base58(sig, 64, 90) =>
+                {
+                    let slot = slot.parse().map_err(|_| bad())?;
+                    last.insert(
+                        a.to_string(),
+                        Mark {
+                            signature: sig.to_string(),
+                            slot,
+                        },
+                    );
                 }
                 _ => return Err(bad()),
             }
@@ -275,8 +314,8 @@ impl Cursor {
 
     pub fn render(&self) -> String {
         let mut text = format!("{}\n", self.binding);
-        for (address, signature) in &self.last {
-            text.push_str(&format!("{address} {signature}\n"));
+        for (address, mark) in &self.last {
+            text.push_str(&format!("{address} {} {}\n", mark.signature, mark.slot));
         }
         text
     }

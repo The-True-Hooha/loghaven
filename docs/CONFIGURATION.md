@@ -208,9 +208,13 @@ How it behaves:
   There is no way to replay older history yet.
 - The newest recorded signature per address is kept in `solana.cursor` next to
   `config.toml`: the first line is a fingerprint of the cluster and the address
-  list, then one `<address> <signature>` line per address. An address with no
-  line is read from its oldest transaction. A file that does not parse stops
-  the watcher with an error instead of guessing.
+  list, then one `<address> <signature> <slot>` line per address. An address with
+  no line (it had no transactions at the first run) is read from its newest
+  10000 transactions. A file that does not parse stops the watcher with an
+  error instead of guessing.
+- If the node lists history older than the saved slot, it does not know the saved
+  signature yet (a lagging or load-balanced node). The poll fails and is retried
+  instead of recording old transactions again.
 - If you change the addresses, or point `rpc_url` at another cluster, the watcher
   stops with an error instead of continuing from a signature that no longer
   fits. Delete `solana.cursor` to start again from the current tip.
@@ -223,7 +227,13 @@ How it behaves:
 - Each program log line is cut at 512 characters and the logs of one
   transaction at about 4 KB; `metadata.log_count` has the real count and
   `metadata.logs_truncated` is set. If the node no longer has a transaction
-  (pruned history), it is still recorded with `metadata.logs_available = false`.
+  (pruned history, or a node that is behind), it is still recorded with
+  `metadata.logs_available = false`, and those logs are not fetched later.
+- If the node returns an error for one transaction every time, the watcher
+  retries it forever and records nothing after it; fix the node or delete
+  `solana.cursor`. While more than `max_signatures` are waiting, each poll lists
+  the whole backlog again (up to 10000 signatures), so a long catch-up makes many
+  calls to the node.
 - Delivery is best effort, with the same limits as the Ethereum adapter: the
   watcher stops with an error and keeps its cursor when the daemon cannot be
   reached, a record the daemon drops after the datagram is sent is not re-sent,
