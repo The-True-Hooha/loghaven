@@ -17,7 +17,10 @@ const STYLE: &str = include_str!("dashboard/app.css");
 
 pub fn routes() -> Router<QueryState> {
     Router::new()
-        .route("/dashboard", get(|| asset("text/html; charset=utf-8", INDEX)))
+        .route(
+            "/dashboard",
+            get(|| asset("text/html; charset=utf-8", INDEX)),
+        )
         .route(
             "/dashboard/app.js",
             get(|| asset("text/javascript; charset=utf-8", SCRIPT)),
@@ -109,7 +112,10 @@ mod tests {
             let h = r.headers();
             assert!(h[header::CONTENT_TYPE].to_str().unwrap().starts_with(kind));
             let csp = h[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
-            assert!(csp.contains("default-src 'none'") && !csp.contains("unsafe"), "{csp}");
+            assert!(
+                csp.contains("default-src 'none'") && !csp.contains("unsafe"),
+                "{csp}"
+            );
             assert_eq!(h[header::REFERRER_POLICY], "no-referrer");
             assert_eq!(h[header::CACHE_CONTROL], "no-store");
         }
@@ -132,7 +138,12 @@ mod tests {
         }
         let r = get_with("/auth", "evil.example:9200").await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
-        for host in ["localhost:9200", "127.0.0.1", "[::1]:9200", "LOCALHOST:9200"] {
+        for host in [
+            "localhost:9200",
+            "127.0.0.1",
+            "[::1]:9200",
+            "LOCALHOST:9200",
+        ] {
             let r = get_with("/dashboard/app.js", host).await;
             assert_eq!(r.status(), StatusCode::OK, "{host:?}");
         }
@@ -140,7 +151,13 @@ mod tests {
 
     #[test]
     fn page_never_writes_untrusted_text_as_html() {
-        for banned in ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("] {
+        for banned in [
+            "innerHTML",
+            "outerHTML",
+            "insertAdjacentHTML",
+            "document.write",
+            "eval(",
+        ] {
             assert!(!SCRIPT.contains(banned), "{banned}");
         }
         assert!(!INDEX.contains("<script>") && !INDEX.contains("onclick"));

@@ -685,16 +685,13 @@ fn open_browser(url: &str) -> std::io::Result<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(std::io::Error::other(format!("opener exited with {status}")))
+        Err(std::io::Error::other(format!(
+            "opener exited with {status}"
+        )))
     }
 }
 
-pub fn dashboard(
-    app: String,
-    ttl_secs: u64,
-    no_open: bool,
-    profile: Option<&str>,
-) -> Result<()> {
+pub fn dashboard(app: String, ttl_secs: u64, no_open: bool, profile: Option<&str>) -> Result<()> {
     if ttl_secs == 0 || ttl_secs > MAX_TOKEN_TTL_SECS {
         return Err(crate::error::LogHavenError::Config(format!(
             "ttl-secs must be between 1 and {MAX_TOKEN_TTL_SECS}"
