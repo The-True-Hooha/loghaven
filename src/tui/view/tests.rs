@@ -56,8 +56,10 @@ fn control_and_bidi_characters_never_reach_the_screen() {
     m.update(Msg::Records(vec![r]));
     key(&mut m, '/');
     key(&mut m, 'a');
-    m.update(Msg::Status("bad\u{1b}[1m".into()));
+    let with_prompt = text(&m, 100, 8);
+    assert!(!with_prompt.contains('\u{1b}'));
     m.input = None;
+    m.update(Msg::Status("bad\u{1b}[1m".into()));
     let screen = text(&m, 100, 8);
     assert!(!screen.contains('\u{1b}') && !screen.contains('\u{202e}'));
     assert!(screen.contains("ok·[2J"));
@@ -151,9 +153,9 @@ fn filters_and_trace_are_named_in_the_header_and_empty_states_explain_themselves
     );
     m.text.clear();
     m.min_level = crate::tui::model::MinLevel::All;
-    assert_eq!(key(&mut m, 't'), Some(Request::Trace("0xabc".into())));
+    assert_eq!(key(&mut m, 't'), Some(Request::Trace(1, "0xabc".into())));
     assert!(text(&m, 100, 5).contains("loading trace"));
-    m.update(Msg::Trace("0xabc".into(), Ok(vec![])));
+    m.update(Msg::Trace(1, Ok((vec![], None))));
     let s = text(&m, 100, 5);
     assert!(
         s.contains("TRACE 0xabc") && s.contains("no records carry"),
@@ -171,6 +173,11 @@ fn typing_a_filter_shows_the_prompt_and_errors_replace_the_key_help() {
     m.update(Msg::Status("cannot reach query server".into()));
     let last = &screen(&m, 80, 4)[3];
     assert!(last.contains("cannot reach") && !last.contains("q quit"));
+    key(&mut m, 't');
+    assert!(
+        screen(&m, 80, 4)[3].contains("no tx_hash"),
+        "a note shows above the poll error"
+    );
 }
 
 #[test]
@@ -182,4 +189,46 @@ fn tiny_terminals_do_not_panic() {
     for (w, h) in [(0, 0), (1, 1), (5, 2), (10, 3), (3, 20), (200, 1)] {
         screen(&m, w, h);
     }
+}
+
+#[test]
+fn clean_removes_line_separators_zero_width_and_combining_floods() {
+    for c in [
+        '\u{2028}', '\u{2029}', '\u{200b}', '\u{200e}', '\u{061c}', '\u{2060}', '\u{feff}',
+        '\u{fe0f}', '\u{85}', '\u{7f}',
+    ] {
+        let out = clean(&format!("a{c}b"));
+        assert_eq!(out, "a·b", "U+{:04X}", c as u32);
+    }
+    let flood = format!("e{}", "\u{0301}".repeat(50));
+    assert_eq!(clean(&flood).chars().count(), 3);
+    assert_eq!(clean("é ünï ✓ 日本"), "é ünï ✓ 日本");
+}
+
+#[test]
+fn a_failed_trace_says_why_in_the_list_and_filters_that_hide_trace_rows_are_named() {
+    let mut m = Model::new(vec!["web".into()]);
+    let mut a = rec("a", 100, "info", "x");
+    a.tx_hash = Some("0xabc".into());
+    m.update(Msg::Records(vec![a]));
+    key(&mut m, 't');
+    m.update(Msg::Trace(1, Err("query failed 500".into())));
+    assert!(text(&m, 100, 5).contains("trace failed: query failed 500"));
+    m.update(Msg::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    key(&mut m, 't');
+    m.update(Msg::Trace(2, Ok((vec![rec("z", 1, "info", "z")], None))));
+    key(&mut m, 'l');
+    assert!(text(&m, 100, 5).contains("no trace records match the current filters"));
+}
+
+#[test]
+fn the_header_says_following_only_for_the_live_list() {
+    let mut m = Model::new(vec!["web".into()]);
+    let mut a = rec("a", 100, "info", "x");
+    a.tx_hash = Some("0xabc".into());
+    m.update(Msg::Records(vec![a]));
+    assert!(screen(&m, 100, 4)[0].contains("following"));
+    key(&mut m, 't');
+    let h = &screen(&m, 100, 4)[0];
+    assert!(h.contains("TRACE") && !h.contains("following"));
 }

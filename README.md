@@ -239,24 +239,23 @@ Three overrides are applied on top of the file: `LOGHAVEN_STORAGE_BACKEND`, `LOG
 
 `loghaven tui --app web [--app api ...]` opens a live view of those apps' logs, merged by time. It loads
 the newest 200 records per app, then follows new ones the same way `logs --follow` does (new records can
-take up to the flush interval to appear). Each app gets its own session, so scoping is unchanged; `--token`
-is for a single app. It keeps the newest 5000 records in memory.
+take up to the flush interval to appear), including asking again with a bigger page when a poll comes back full. If more than 10000 records arrive in one poll, the footer says some may be missing. Each app is polled independently, so a slow app delays only itself. Each app gets its own session, reused for traces, so scoping is unchanged; `--token` is for a single app. It keeps the newest 5000 records in memory.
 
 | Key | Action |
 |-----|--------|
 | `j` / `k`, arrows, PageUp/PageDown | Move the highlight. Moving to the newest row resumes following; moving away pauses it. |
 | `g` / `G` | Oldest loaded record / newest record (and follow). |
-| `p` | Pause or resume following. |
+| `p` | Pause or resume following (not in a trace). |
 | `/` | Type a text filter (case-insensitive over message, source, app, tx hash, trace id, chain, tags). Enter applies, Esc cancels, Ctrl+U clears the line. |
 | `l` | Cycle the level filter: all, error, warn and up, info and up. |
-| `t` | Trace the highlighted record's `tx_hash`: fetch every record with it from all the apps you opened, oldest first. Esc returns to the live view. |
+| `t` | Trace the highlighted record's `tx_hash`: fetch the records with it from all the apps you opened (the newest 1000 per app; the footer says when that cuts the list), oldest first. A trace has its own highlight; Esc returns to the live view exactly as you left it. |
 | `Enter` | Show every field of the highlighted record. |
 | `Esc` | Leave a trace, or clear the text filter. |
 | `q`, Ctrl+C | Quit. |
 
-Filters apply to the records already loaded; a trace asks the daemon, so it also finds older records.
-Times are UTC. Log content is untrusted, so control and bidirectional-override characters are shown as `·`.
-The terminal is restored on exit and on a crash.
+Filters apply to what is on screen: the loaded records, or the trace's records. A trace asks the daemon, so it also finds older records than the 5000 loaded. If the highlighted record is dropped or hidden by a filter, the highlight moves to the next record in time. Records with an unrecognised level count as `info`.
+Times are UTC. Log content is untrusted, so control, line-separator, zero-width and bidirectional-override characters are shown as `·` and long runs of combining marks are cut.
+The terminal is restored on quit, Ctrl+C, SIGTERM, SIGHUP and a panic. `kill -9` cannot be caught: run `reset` afterwards.
 
 ## Roadmap
 

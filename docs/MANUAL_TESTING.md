@@ -205,6 +205,8 @@ loghaven tui --app web --app api
 | Enter | all fields of the highlighted record |
 | stop the daemon | footer shows the error; it clears when the daemon is back |
 | resize the window very small | no crash |
+| `k` onto the `payment` line, `t`, move around, then Esc | the live view is as before (still following if it was) |
 | `q` | the terminal is restored (no stray characters, cursor visible) |
+| `kill <pid>` of the tui from another terminal | the terminal is restored |
 | `loghaven tui --app web < /dev/null` | error: needs an interactive terminal |
 

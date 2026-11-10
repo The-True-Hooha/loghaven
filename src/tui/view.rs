@@ -4,25 +4,52 @@
 use super::model::Model;
 use crate::storage::record::LogRecord;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 const DETAIL_HEIGHT: u16 = 12;
 
+/// Characters that move the cursor, reorder text, break lines or have no width.
+fn is_unsafe(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{061c}'
+                | '\u{feff}'
+                | '\u{fe00}'..='\u{fe0f}'
+        )
+}
+
+fn is_combining(c: char) -> bool {
+    matches!(c, '\u{0300}'..='\u{036f}' | '\u{1ab0}'..='\u{1aff}' | '\u{1dc0}'..='\u{1dff}' | '\u{20d0}'..='\u{20ff}' | '\u{fe20}'..='\u{fe2f}')
+}
+
 /// Control characters would let a log line move the cursor or rewrite the screen;
-/// bidirectional overrides would let it reorder what the operator reads.
+/// bidirectional overrides would let it reorder what the operator reads; long runs of
+/// combining marks would smear over neighbouring rows.
 pub fn clean(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
-                '·'
-            } else {
-                c
+    let mut run = 0;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if is_unsafe(c) {
+            out.push('·');
+            run = 0;
+        } else if is_combining(c) {
+            run += 1;
+            if run <= 2 {
+                out.push(c);
             }
-        })
-        .collect()
+        } else {
+            run = 0;
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// `HH:MM:SS.mmm` in UTC.
@@ -130,7 +157,9 @@ fn header(m: &Model) -> Line<'static> {
             format!("TRACE {} ", clean(&t.hash)),
             Style::new().fg(Color::Magenta),
         )),
-        None if m.follow => spans.push(Span::styled("following ", Style::new().fg(Color::Green))),
+        None if m.following() => {
+            spans.push(Span::styled("following ", Style::new().fg(Color::Green)))
+        }
         None => spans.push(Span::styled("paused ", Style::new().fg(Color::Yellow))),
     }
     Line::from(spans)
@@ -148,8 +177,14 @@ fn footer(m: &Model) -> Line<'static> {
             ),
         ]);
     }
-    if !m.status.is_empty() {
-        return Line::from(Span::styled(clean(&m.status), Style::new().fg(Color::Red)));
+    if !m.note.is_empty() {
+        return Line::from(Span::styled(clean(&m.note), Style::new().fg(Color::Yellow)));
+    }
+    if !m.poll_error.is_empty() {
+        return Line::from(Span::styled(
+            clean(&m.poll_error),
+            Style::new().fg(Color::Red),
+        ));
     }
     Line::from(Span::styled(
         "q quit  j/k move  g/G top/newest  p pause  / filter  l level  t trace tx  Enter detail  Esc back",
@@ -193,9 +228,17 @@ pub fn draw(frame: &mut Frame, m: &Model) {
         })
         .collect();
     if lines.is_empty() {
+        let failed;
         let msg = match &m.trace {
             Some(t) if t.loading => "loading trace…",
-            Some(_) => "no records carry this transaction hash",
+            Some(t) if t.error.is_some() => {
+                failed = format!("trace failed: {}", clean(t.error.as_deref().unwrap_or("")));
+                failed.as_str()
+            }
+            Some(_) if m.text.is_empty() && m.min_level == super::model::MinLevel::All => {
+                "no records carry this transaction hash"
+            }
+            Some(_) => "no trace records match the current filters (Esc leaves the trace)",
             None => "no records yet (new ones can take up to the flush interval to appear)",
         };
         frame.render_widget(
@@ -212,7 +255,7 @@ pub fn draw(frame: &mut Frame, m: &Model) {
             Paragraph::new(body)
                 .wrap(Wrap { trim: false })
                 .block(Block::default().borders(Borders::TOP)),
-            Rect { ..det },
+            det,
         );
     }
     frame.render_widget(Paragraph::new(footer(m)), foot);

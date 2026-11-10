@@ -7,19 +7,26 @@ use crate::client::fetch_logs;
 use crate::client::follow::FollowState;
 use crate::config::Config;
 use crate::storage::record::LogRecord;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::time::MissedTickBehavior;
 
 const POLL: Duration = Duration::from_secs(1);
 /// Records loaded per app when the UI opens.
 const INITIAL: usize = 200;
 const PAGE: usize = 1000;
+const MAX_PAGE: usize = 10_000;
 const TRACE_LIMIT: usize = 1000;
 const SESSION_TTL_SECS: u64 = 3600;
 
+type SharedToken = Arc<Mutex<QueryToken>>;
+
 struct AppFeed {
     app: String,
-    token: QueryToken,
+    token: SharedToken,
     state: FollowState,
     started: bool,
 }
@@ -38,46 +45,118 @@ fn params(app: &str, limit: usize, from_ms: Option<i64>) -> Vec<(&'static str, S
     p
 }
 
+async fn fetch(
+    port: u16,
+    token: &SharedToken,
+    p: &[(&'static str, String)],
+) -> crate::error::Result<Vec<LogRecord>> {
+    let t = token.lock().await.get().await?;
+    fetch_logs(port, p, t.as_deref()).await
+}
+
 impl AppFeed {
-    async fn poll(&mut self, port: u16) -> crate::error::Result<Vec<LogRecord>> {
+    /// New records, and a warning when a page was full even at the largest size.
+    async fn poll(&mut self, port: u16) -> crate::error::Result<(Vec<LogRecord>, Option<String>)> {
         let (limit, from) = if self.started {
             (PAGE, Some(self.state.next_from_ms()))
         } else {
             (INITIAL, None)
         };
-        let token = self.token.get().await?;
-        let batch = fetch_logs(port, &params(&self.app, limit, from), token.as_deref()).await?;
+        let mut batch = fetch(port, &self.token, &params(&self.app, limit, from)).await?;
+        let mut warning = None;
+        // like `logs --follow`: a full page may hide older records, so ask for more once
+        if self.started && batch.len() >= PAGE {
+            batch = fetch(port, &self.token, &params(&self.app, MAX_PAGE, from)).await?;
+            if batch.len() >= MAX_PAGE {
+                warning = Some(format!(
+                    "{}: more than {MAX_PAGE} records in one poll; some may be missing",
+                    self.app
+                ));
+            }
+        }
         self.started = true;
-        Ok(self.state.accept(batch))
+        Ok((self.state.accept(batch), warning))
     }
 }
 
 async fn trace(
-    cfg: &Config,
-    apps: &[String],
-    explicit: &Option<String>,
-    hash: &str,
-) -> Result<Vec<LogRecord>, String> {
+    port: u16,
+    tokens: Vec<(String, SharedToken)>,
+    hash: String,
+) -> Result<(Vec<LogRecord>, Option<String>), String> {
     let mut all = vec![];
     let mut errors = vec![];
-    for app in apps {
-        let mut token = QueryToken::new(cfg, app, explicit.clone(), SESSION_TTL_SECS);
+    let mut cut = vec![];
+    for (app, token) in &tokens {
         let mut p = params(app, TRACE_LIMIT, None);
-        p.push(("tx_hash", hash.to_string()));
-        let got = async {
-            let t = token.get().await?;
-            fetch_logs(cfg.auth.query_port, &p, t.as_deref()).await
-        }
-        .await;
-        match got {
-            Ok(r) => all.extend(r),
+        p.push(("tx_hash", hash.clone()));
+        match fetch(port, token, &p).await {
+            Ok(r) => {
+                if r.len() >= TRACE_LIMIT {
+                    cut.push(app.clone());
+                }
+                all.extend(r);
+            }
             Err(e) => errors.push(format!("{app}: {e}")),
         }
     }
     if all.is_empty() && !errors.is_empty() {
         return Err(errors.join("; "));
     }
-    Ok(all)
+    let mut notes = vec![];
+    if !cut.is_empty() {
+        notes.push(format!(
+            "showing only the newest {TRACE_LIMIT} records of {}",
+            cut.join(", ")
+        ));
+    }
+    if !errors.is_empty() {
+        notes.push(format!("incomplete: {}", errors.join("; ")));
+    }
+    Ok((all, (!notes.is_empty()).then(|| notes.join("; "))))
+}
+
+/// Problems per app, joined into the one status line the UI shows.
+type Problems = Arc<std::sync::Mutex<BTreeMap<String, String>>>;
+
+/// One app's polling loop. Apps run independently, so a hung one delays only itself.
+async fn follow_app(
+    mut feed: AppFeed,
+    port: u16,
+    tx: UnboundedSender<Msg>,
+    problems: Problems,
+    last_sent: Arc<std::sync::Mutex<String>>,
+) {
+    let mut tick = tokio::time::interval(POLL);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        let problem = match feed.poll(port).await {
+            Ok((fresh, warning)) => {
+                if !fresh.is_empty() && tx.send(Msg::Records(fresh)).is_err() {
+                    return;
+                }
+                warning.unwrap_or_default()
+            }
+            Err(e) => format!("{}: {e}", feed.app),
+        };
+        let status = {
+            let mut all = problems.lock().unwrap();
+            if problem.is_empty() {
+                all.remove(&feed.app);
+            } else {
+                all.insert(feed.app.clone(), problem);
+            }
+            all.values().cloned().collect::<Vec<_>>().join("; ")
+        };
+        let mut last = last_sent.lock().unwrap();
+        if *last != status {
+            last.clone_from(&status);
+            if tx.send(Msg::Status(status)).is_err() {
+                return;
+            }
+        }
+    }
 }
 
 pub async fn run(
@@ -87,49 +166,49 @@ pub async fn run(
     tx: UnboundedSender<Msg>,
     mut requests: UnboundedReceiver<Request>,
 ) {
-    let mut feeds: Vec<AppFeed> = apps
-        .iter()
-        .map(|app| AppFeed {
+    let port = cfg.auth.query_port;
+    let problems: Problems = Arc::default();
+    let last_sent = Arc::new(std::sync::Mutex::new(String::new()));
+    let mut tokens: Vec<(String, SharedToken)> = vec![];
+    let mut tasks = tokio::task::JoinSet::new();
+    for app in &apps {
+        let token = Arc::new(Mutex::new(QueryToken::new(
+            &cfg,
+            app,
+            explicit.clone(),
+            SESSION_TTL_SECS,
+        )));
+        tokens.push((app.clone(), token.clone()));
+        let feed = AppFeed {
             app: app.clone(),
-            token: QueryToken::new(&cfg, app, explicit.clone(), SESSION_TTL_SECS),
+            token,
             state: FollowState::new(
                 now_ms(),
                 (cfg.storage.local.flush_interval_secs as i64 * 2 + 5) * 1000,
             ),
             started: false,
-        })
-        .collect();
-    let mut last_status = String::new();
-    let mut tick = tokio::time::interval(POLL);
+        };
+        tasks.spawn(follow_app(
+            feed,
+            port,
+            tx.clone(),
+            problems.clone(),
+            last_sent.clone(),
+        ));
+    }
+    // the polling tasks end with this function (JoinSet aborts them on drop)
     loop {
         tokio::select! {
             req = requests.recv() => {
-                let Some(Request::Trace(hash)) = req else { return };
-                let result = trace(&cfg, &apps, &explicit, &hash).await;
-                if tx.send(Msg::Trace(hash, result)).is_err() {
-                    return;
-                }
+                let Some(Request::Trace(id, hash)) = req else { return };
+                let tokens = tokens.clone();
+                let reply = tx.clone();
+                tokio::spawn(async move {
+                    let result = trace(port, tokens, hash).await;
+                    let _ = reply.send(Msg::Trace(id, result));
+                });
             }
-            _ = tick.tick() => {
-                let mut fresh = vec![];
-                let mut errors = vec![];
-                for feed in &mut feeds {
-                    match feed.poll(cfg.auth.query_port).await {
-                        Ok(r) => fresh.extend(r),
-                        Err(e) => errors.push(format!("{}: {e}", feed.app)),
-                    }
-                }
-                if !fresh.is_empty() && tx.send(Msg::Records(fresh)).is_err() {
-                    return;
-                }
-                let status = errors.join("; ");
-                if status != last_status {
-                    last_status = status.clone();
-                    if tx.send(Msg::Status(status)).is_err() {
-                        return;
-                    }
-                }
-            }
+            _ = tx.closed() => return,
         }
     }
 }

@@ -150,7 +150,11 @@ fn level_filter_cycles_and_admits_by_severity() {
     ch(&mut m, 'l');
     assert_eq!(ids(&m), ["e", "w"]);
     ch(&mut m, 'l');
-    assert_eq!(ids(&m), ["e", "w", "i"]);
+    assert_eq!(
+        ids(&m),
+        ["e", "w", "i", "x"],
+        "unknown levels count as info"
+    );
     ch(&mut m, 'l');
     assert_eq!(m.min_level, MinLevel::All);
 }
@@ -242,7 +246,7 @@ fn t_asks_for_the_trace_of_the_selected_transaction() {
     a.tx_hash = Some("0xabc".into());
     m.update(Msg::Records(vec![a, rec("b", 2, "info", "no tx")]));
     ch(&mut m, 'k');
-    assert_eq!(ch(&mut m, 't'), Some(Request::Trace("0xabc".into())));
+    assert_eq!(ch(&mut m, 't'), Some(Request::Trace(1, "0xabc".into())));
     assert!(m.trace.as_ref().unwrap().loading);
 }
 
@@ -251,7 +255,7 @@ fn t_on_a_record_without_a_hash_says_so_and_asks_for_nothing() {
     let mut m = model(2);
     assert_eq!(ch(&mut m, 't'), None);
     assert!(m.trace.is_none());
-    assert!(m.status.contains("no tx_hash"));
+    assert!(m.note.contains("no tx_hash"));
 }
 
 #[test]
@@ -265,7 +269,7 @@ fn a_trace_result_replaces_the_list_oldest_first_and_esc_returns_to_the_live_vie
     web.app = "web".into();
     let mut api = rec("p", 10, "info", "api side");
     api.app = "api".into();
-    m.update(Msg::Trace("0xabc".into(), Ok(vec![web.clone(), api, web])));
+    m.update(Msg::Trace(1, Ok((vec![web.clone(), api, web], None))));
     assert_eq!(ids(&m), ["p", "w"], "sorted, deduped");
     assert_eq!(sel(&m), "p");
     press(&mut m, KeyCode::Esc);
@@ -276,19 +280,13 @@ fn a_trace_result_replaces_the_list_oldest_first_and_esc_returns_to_the_live_vie
 #[test]
 fn a_trace_result_for_a_closed_or_different_trace_is_ignored() {
     let mut m = model(1);
-    m.update(Msg::Trace(
-        "0xabc".into(),
-        Ok(vec![rec("z", 1, "info", "")]),
-    ));
+    m.update(Msg::Trace(1, Ok((vec![rec("z", 1, "info", "")], None))));
     assert!(m.trace.is_none() && ids(&m) == ["r1"]);
     let mut a = rec("a", 100, "info", "");
     a.tx_hash = Some("0xabc".into());
     m.update(Msg::Records(vec![a]));
     ch(&mut m, 't');
-    m.update(Msg::Trace(
-        "0xother".into(),
-        Ok(vec![rec("z", 1, "info", "")]),
-    ));
+    m.update(Msg::Trace(99, Ok((vec![rec("z", 1, "info", "")], None))));
     assert!(m.trace.as_ref().unwrap().loading);
 }
 
@@ -299,10 +297,10 @@ fn a_failed_trace_shows_the_error_and_leaves_an_empty_trace_open() {
     a.tx_hash = Some("0xabc".into());
     m.update(Msg::Records(vec![a]));
     ch(&mut m, 't');
-    m.update(Msg::Trace("0xabc".into(), Err("boom".into())));
-    assert!(m.status.contains("boom"));
+    m.update(Msg::Trace(1, Err("boom".into())));
     let t = m.trace.as_ref().unwrap();
     assert!(!t.loading && t.records.is_empty());
+    assert_eq!(t.error.as_deref(), Some("boom"));
 }
 
 #[test]
@@ -313,24 +311,174 @@ fn enter_toggles_the_detail_pane_and_status_is_replaced() {
     press(&mut m, KeyCode::Enter);
     assert!(!m.detail);
     m.update(Msg::Status("cannot reach".into()));
-    assert_eq!(m.status, "cannot reach");
+    assert_eq!(m.poll_error, "cannot reach");
     m.update(Msg::Status(String::new()));
-    assert!(m.status.is_empty());
+    assert!(m.poll_error.is_empty());
 }
 
 #[test]
-fn the_highlight_survives_a_filter_that_hides_it() {
+fn a_highlight_hidden_by_a_filter_settles_on_the_next_row_in_time_not_the_newest() {
     let mut m = Model::new(vec![]);
     m.update(Msg::Records(vec![
-        rec("e", 1, "error", ""),
-        rec("i", 2, "info", ""),
+        rec("a", 1, "error", ""),
+        rec("b", 2, "info", ""),
+        rec("c", 3, "error", ""),
+        rec("d", 4, "error", ""),
     ]));
+    ch(&mut m, 'g');
+    ch(&mut m, 'j');
+    assert_eq!(sel(&m), "b");
+    ch(&mut m, 'l');
+    assert_eq!(
+        sel(&m),
+        "c",
+        "b is hidden; the next visible row is c, not the newest d"
+    );
+    assert!(!m.follow);
+    ch(&mut m, 'l');
+    ch(&mut m, 'l');
+    ch(&mut m, 'l');
+    assert_eq!(
+        sel(&m),
+        "b",
+        "and b is highlighted again when it is visible"
+    );
+}
+
+#[test]
+fn a_paused_highlight_dropped_by_the_cap_settles_on_the_oldest_kept_row() {
+    let mut m = Model::new(vec![]);
+    m.update(Msg::Records(vec![rec("a", 0, "info", "")]));
+    ch(&mut m, 'p');
+    let n = MAX_RECORDS as i64 + 5;
+    m.update(Msg::Records(
+        (1..=n)
+            .map(|i| rec(&format!("{i:06}"), i, "info", ""))
+            .collect(),
+    ));
+    assert!(!m.follow);
+    assert_eq!(sel(&m), format!("{:06}", n - MAX_RECORDS as i64 + 1));
+}
+
+#[test]
+fn movement_inside_a_trace_leaves_the_live_view_exactly_as_it_was() {
+    let mut m = Model::new(vec![]);
+    let mut a = rec("a", 100, "info", "");
+    a.tx_hash = Some("0xabc".into());
+    m.update(Msg::Records(vec![rec("r0", 1, "info", ""), a]));
+    assert!(m.follow);
+    ch(&mut m, 't');
+    m.update(Msg::Trace(
+        1,
+        Ok((
+            vec![rec("t1", 5, "info", ""), rec("t2", 6, "info", "")],
+            None,
+        )),
+    ));
+    for c in ['j', 'k', 'g', 'G', 'p', 'k'] {
+        ch(&mut m, c);
+    }
+    press(&mut m, KeyCode::Esc);
+    assert!(m.follow, "following state is untouched by the trace");
+    assert_eq!(sel(&m), "a");
+}
+
+#[test]
+fn the_trace_keeps_its_own_highlight() {
+    let mut m = Model::new(vec![]);
+    let mut a = rec("a", 100, "info", "");
+    a.tx_hash = Some("0xabc".into());
+    m.update(Msg::Records(vec![a]));
+    ch(&mut m, 't');
+    m.update(Msg::Trace(
+        1,
+        Ok((
+            vec![rec("t1", 5, "info", ""), rec("t2", 6, "info", "")],
+            None,
+        )),
+    ));
+    assert_eq!(sel(&m), "t1");
+    ch(&mut m, 'j');
+    assert_eq!(sel(&m), "t2");
+    ch(&mut m, 'j');
+    assert_eq!(sel(&m), "t2");
     ch(&mut m, 'k');
-    assert_eq!(sel(&m), "e");
+    assert_eq!(sel(&m), "t1");
+}
+
+#[test]
+fn a_reply_to_an_earlier_trace_of_the_same_hash_is_ignored() {
+    let mut m = Model::new(vec![]);
+    let mut a = rec("a", 100, "info", "");
+    a.tx_hash = Some("0xabc".into());
+    m.update(Msg::Records(vec![a]));
+    ch(&mut m, 't');
+    press(&mut m, KeyCode::Esc);
+    assert_eq!(ch(&mut m, 't'), Some(Request::Trace(2, "0xabc".into())));
+    m.update(Msg::Trace(1, Err("stale".into())));
+    let t = m.trace.as_ref().unwrap();
+    assert!(t.loading && t.error.is_none());
+}
+
+#[test]
+fn t_while_a_trace_is_loading_does_not_queue_another() {
+    let mut m = Model::new(vec![]);
+    let mut a = rec("a", 100, "info", "");
+    a.tx_hash = Some("0xabc".into());
+    m.update(Msg::Records(vec![a]));
+    assert!(ch(&mut m, 't').is_some());
+    assert_eq!(ch(&mut m, 't'), None);
+    assert!(m.note.contains("still loading"));
+}
+
+#[test]
+fn an_empty_tx_hash_is_not_traced() {
+    let mut m = Model::new(vec![]);
+    let mut a = rec("a", 1, "info", "");
+    a.tx_hash = Some(String::new());
+    m.update(Msg::Records(vec![a]));
+    assert_eq!(ch(&mut m, 't'), None);
+    assert!(m.note.contains("no tx_hash"));
+}
+
+#[test]
+fn a_note_lasts_until_the_next_key_and_does_not_hide_the_poll_error() {
+    let mut m = model(1);
+    m.update(Msg::Status("daemon down".into()));
+    ch(&mut m, 't');
+    assert!(!m.note.is_empty());
+    ch(&mut m, 'j');
+    assert!(m.note.is_empty());
+    assert_eq!(m.poll_error, "daemon down");
+}
+
+#[test]
+fn trace_notes_about_truncation_are_shown() {
+    let mut m = Model::new(vec![]);
+    let mut a = rec("a", 100, "info", "");
+    a.tx_hash = Some("0xabc".into());
+    m.update(Msg::Records(vec![a]));
+    ch(&mut m, 't');
+    m.update(Msg::Trace(
+        1,
+        Ok((vec![], Some("showing only the newest 1000".into()))),
+    ));
+    assert!(m.note.contains("newest 1000"));
+}
+
+#[test]
+fn unusual_level_names_are_not_hidden_by_the_error_and_warn_filters() {
+    let mut m = Model::new(vec![]);
+    m.update(Msg::Records(vec![
+        rec("c", 1, "critical", ""),
+        rec("n", 2, "notice", ""),
+        rec("e", 3, "ERR", ""),
+        rec("u", 4, "banana", ""),
+    ]));
     ch(&mut m, 'l');
+    assert_eq!(ids(&m), ["c", "e"]);
     ch(&mut m, 'l');
+    assert_eq!(ids(&m), ["c", "e"]);
     ch(&mut m, 'l');
-    assert!(m.selected().is_some());
-    ch(&mut m, 'l');
-    assert_eq!(sel(&m), "e");
+    assert_eq!(ids(&m), ["c", "n", "e", "u"]);
 }

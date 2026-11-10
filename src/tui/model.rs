@@ -36,10 +36,11 @@ impl MinLevel {
 
     fn admits(self, level: &str) -> bool {
         let rank = match level.to_ascii_lowercase().as_str() {
-            "error" | "fatal" => 0,
+            "error" | "err" | "fatal" | "critical" | "crit" | "panic" | "emerg" | "alert" => 0,
             "warn" | "warning" => 1,
-            "info" => 2,
-            _ => 3,
+            "debug" | "trace" => 3,
+            // "info", "notice" and anything unknown: shown unless only errors or warnings are wanted
+            _ => 2,
         };
         match self {
             Self::All => true,
@@ -52,23 +53,46 @@ impl MinLevel {
 
 /// All records that carry one transaction hash, fetched from the daemon.
 pub struct Trace {
+    pub id: u64,
     pub hash: String,
     pub records: Vec<LogRecord>,
     pub loading: bool,
+    pub error: Option<String>,
+    selected: Option<Pos>,
 }
+
+/// Where the highlight sits: the record's id, plus its sort key so the highlight can
+/// settle on a neighbour when that record is dropped or filtered out.
+#[derive(Clone, Debug)]
+struct Pos {
+    ts: i64,
+    id: String,
+}
+
+impl Pos {
+    fn of(r: &LogRecord) -> Self {
+        Self {
+            ts: r.timestamp_ms,
+            id: r.id.clone(),
+        }
+    }
+}
+
+/// Records and fetch notes from one trace request.
+pub type TraceResult = Result<(Vec<LogRecord>, Option<String>), String>;
 
 pub enum Msg {
     Key(KeyEvent),
     Records(Vec<LogRecord>),
-    Trace(String, Result<Vec<LogRecord>, String>),
-    /// Empty text means the last fetch worked.
+    Trace(u64, TraceResult),
+    /// Problem with polling; empty text means the last poll worked.
     Status(String),
 }
 
 /// Something the fetcher must do on the model's behalf.
 #[derive(Debug, PartialEq)]
 pub enum Request {
-    Trace(String),
+    Trace(u64, String),
 }
 
 pub struct Model {
@@ -80,10 +104,14 @@ pub struct Model {
     /// `Some` while the text filter is being typed.
     pub input: Option<String>,
     pub trace: Option<Trace>,
-    selected_id: Option<String>,
+    selected: Option<Pos>,
     pub follow: bool,
     pub detail: bool,
-    pub status: String,
+    /// Polling problem reported by the fetcher; stays until it changes.
+    pub poll_error: String,
+    /// Answer to the last key press; cleared by the next one.
+    pub note: String,
+    next_trace: u64,
     pub quit: bool,
 }
 
@@ -100,10 +128,12 @@ impl Model {
             text: String::new(),
             input: None,
             trace: None,
-            selected_id: None,
+            selected: None,
             follow: true,
             detail: false,
-            status: String::new(),
+            poll_error: String::new(),
+            note: String::new(),
+            next_trace: 0,
             quit: false,
         }
     }
@@ -139,29 +169,59 @@ impl Model {
         source.iter().filter(|r| self.matches(r)).collect()
     }
 
-    /// Index of the highlighted row in `visible`, if any row exists.
+    fn highlight(&self) -> Option<&Pos> {
+        match &self.trace {
+            Some(t) => t.selected.as_ref(),
+            None => self.selected.as_ref(),
+        }
+    }
+
+    fn set_highlight(&mut self, pos: Option<Pos>) {
+        match self.trace.as_mut() {
+            Some(t) => t.selected = pos,
+            None => self.selected = pos,
+        }
+    }
+
+    /// Following only applies to the live list; a trace is read in place.
+    pub fn following(&self) -> bool {
+        self.follow && self.trace.is_none()
+    }
+
+    /// Index of the highlighted row in `visible`, if any row exists. A highlight whose
+    /// record is gone (dropped by the cap, hidden by a filter) settles on the nearest
+    /// row that follows it in time.
     pub fn cursor(&self, visible: &[&LogRecord]) -> Option<usize> {
         if visible.is_empty() {
             return None;
         }
-        if self.follow && self.trace.is_none() {
+        if self.following() {
             return Some(visible.len() - 1);
         }
-        self.selected_id
-            .as_ref()
-            .and_then(|id| visible.iter().position(|r| &r.id == id))
-            .or(Some(visible.len() - 1))
+        let Some(pos) = self.highlight() else {
+            return Some(visible.len() - 1);
+        };
+        Some(
+            visible
+                .iter()
+                .position(|r| r.id == pos.id)
+                .unwrap_or_else(|| {
+                    visible
+                        .partition_point(|r| key(r) < (pos.ts, pos.id.as_str()))
+                        .min(visible.len() - 1)
+                }),
+        )
     }
 
     /// Remembers the row at `index` (or, when `None`, the current row) as the highlight.
     fn select(&mut self, index: Option<usize>) {
         let visible = self.visible();
-        let id = match index {
-            Some(i) => visible.get(i).map(|r| r.id.clone()),
-            None => self.cursor(&visible).map(|i| visible[i].id.clone()),
+        let pos = match index {
+            Some(i) => visible.get(i).map(|r| Pos::of(r)),
+            None => self.cursor(&visible).map(|i| Pos::of(visible[i])),
         };
-        if id.is_some() {
-            self.selected_id = id;
+        if pos.is_some() {
+            self.set_highlight(pos);
         }
     }
 
@@ -177,10 +237,12 @@ impl Model {
         };
         let last = visible.len() - 1;
         let next = cur.saturating_add_signed(delta).min(last);
-        let id = visible[next].id.clone();
-        self.selected_id = Some(id);
+        let pos = Pos::of(visible[next]);
+        self.set_highlight(Some(pos));
         // reaching the newest row again resumes following; moving away stops it
-        self.follow = delta > 0 && next == last;
+        if self.trace.is_none() {
+            self.follow = delta > 0 && next == last;
+        }
     }
 
     pub fn selected(&self) -> Option<&LogRecord> {
@@ -215,29 +277,33 @@ impl Model {
                 }
                 None
             }
-            Msg::Trace(hash, result) => {
-                if let Some(t) = self.trace.as_mut().filter(|t| t.hash == hash) {
+            Msg::Trace(id, result) => {
+                if let Some(t) = self.trace.as_mut().filter(|t| t.id == id) {
                     t.loading = false;
                     match result {
-                        Ok(mut recs) => {
+                        Ok((mut recs, note)) => {
                             recs.sort_by(|a, b| key(a).cmp(&key(b)));
                             recs.dedup_by(|a, b| a.id == b.id);
+                            t.selected = recs.first().map(Pos::of);
                             t.records = recs;
-                            self.selected_id = t.records.first().map(|r| r.id.clone());
+                            if let Some(n) = note {
+                                self.note = n;
+                            }
                         }
-                        Err(e) => self.status = format!("trace failed: {e}"),
+                        Err(e) => t.error = Some(e),
                     }
                 }
                 None
             }
             Msg::Status(s) => {
-                self.status = s;
+                self.poll_error = s;
                 None
             }
         }
     }
 
     fn on_key(&mut self, k: KeyEvent) -> Option<Request> {
+        self.note.clear();
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && k.code == KeyCode::Char('c') {
             self.quit = true;
@@ -261,26 +327,26 @@ impl Model {
         match k.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Down | KeyCode::Char('j') => self.step(1),
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.step(-1);
-                self.follow = false;
-            }
+            KeyCode::Up | KeyCode::Char('k') => self.step(-1),
             KeyCode::PageDown => self.step(10),
-            KeyCode::PageUp => {
-                self.step(-10);
-                self.follow = false;
-            }
+            KeyCode::PageUp => self.step(-10),
             KeyCode::Char('g') | KeyCode::Home => {
                 self.select(Some(0));
-                self.follow = false;
+                if self.trace.is_none() {
+                    self.follow = false;
+                }
             }
             KeyCode::Char('G') | KeyCode::End => {
                 self.select_last();
-                self.follow = true;
+                if self.trace.is_none() {
+                    self.follow = true;
+                }
             }
             KeyCode::Char('p') => {
-                self.select(None);
-                self.follow = !self.follow;
+                if self.trace.is_none() {
+                    self.select(None);
+                    self.follow = !self.follow;
+                }
             }
             KeyCode::Char('/') => self.input = Some(self.text.clone()),
             KeyCode::Char('l') => self.min_level = self.min_level.next(),
@@ -293,18 +359,28 @@ impl Model {
                 }
             }
             KeyCode::Char('t') => {
-                let hash = self.selected().and_then(|r| r.tx_hash.clone());
+                if self.trace.as_ref().is_some_and(|t| t.loading) {
+                    self.note = "a trace is still loading".into();
+                    return None;
+                }
+                let hash = self
+                    .selected()
+                    .and_then(|r| r.tx_hash.clone())
+                    .filter(|h| !h.is_empty());
                 match hash {
                     Some(hash) => {
+                        self.next_trace += 1;
                         self.trace = Some(Trace {
+                            id: self.next_trace,
                             hash: hash.clone(),
                             records: vec![],
                             loading: true,
+                            error: None,
+                            selected: None,
                         });
-                        self.status.clear();
-                        return Some(Request::Trace(hash));
+                        return Some(Request::Trace(self.next_trace, hash));
                     }
-                    None => self.status = "selected record has no tx_hash".into(),
+                    None => self.note = "selected record has no tx_hash".into(),
                 }
             }
             _ => {}

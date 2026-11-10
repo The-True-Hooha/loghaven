@@ -47,20 +47,49 @@ pub fn run(apps: Vec<String>, token: Option<String>, profile: Option<&str>) -> R
     let (req_tx, req_rx) = tokio::sync::mpsc::unbounded_channel();
     rt.spawn(fetch::run(cfg, apps.clone(), token, tx, req_rx));
 
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        // a kill signal must still put the terminal back, so it ends the loop like `q`
+        let _guard = rt.enter();
+        for kind in [SignalKind::terminate(), SignalKind::hangup()] {
+            if let Ok(mut sig) = signal(kind) {
+                let stop = stop.clone();
+                rt.spawn(async move {
+                    sig.recv().await;
+                    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                });
+            }
+        }
+    }
+
     let mut terminal = ratatui::init();
     let _restore = Restore;
     let mut model = Model::new(apps);
-    while !model.quit {
+    while !model.quit && !stop.load(std::sync::atomic::Ordering::SeqCst) {
         terminal.draw(|f| view::draw(f, &model))?;
         if event::poll(Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
             && let Some(request) = model.update(Msg::Key(key))
+            && req_tx.send(request).is_err()
         {
-            let _ = req_tx.send(request);
+            model.note = "background fetching stopped; restart the UI".into();
         }
-        while let Ok(msg) = rx.try_recv() {
-            model.update(msg);
+        loop {
+            match rx.try_recv() {
+                Ok(msg) => {
+                    model.update(msg);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    model.update(Msg::Status(
+                        "background fetching stopped; restart the UI".into(),
+                    ));
+                    break;
+                }
+            }
         }
     }
     Ok(())
