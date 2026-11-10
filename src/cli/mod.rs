@@ -39,6 +39,14 @@ pub enum WatchCommands {
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
     },
+    #[command(about = "Poll Stellar transactions (settings: [chains.stellar] in config)")]
+    Stellar {
+        #[arg(long, help = "Process the available transactions once and exit")]
+        once: bool,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
     #[command(about = "Poll Solana transactions (settings: [chains.solana] in config)")]
     Solana {
         #[arg(long, help = "Process the available transactions once and exit")]
@@ -300,6 +308,9 @@ pub fn execute(cli: Cli) -> crate::error::Result<()> {
         Some(Commands::Watch {
             chain: WatchCommands::Solana { once, profile },
         }) => commands::watch_solana(once, profile.as_deref()),
+        Some(Commands::Watch {
+            chain: WatchCommands::Stellar { once, profile },
+        }) => commands::watch_stellar(once, profile.as_deref()),
         Some(Commands::Trace {
             tx_hash,
             apps,

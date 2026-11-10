@@ -30,6 +30,8 @@ rsa = { version = "0.9", features = ["pem"] }
 hex = "0.4"
 axum = "0.8"
 reqwest = { version = "0.12", features = ["json"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 
 [dev-dependencies]
 tempfile = "3"

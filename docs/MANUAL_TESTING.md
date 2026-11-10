@@ -92,7 +92,7 @@ max_block_range = 100
 | `echo 99999999 > ethereum.cursor` | error: far ahead of the chain head |
 | change `addresses`, then run again | error: cursor was saved for another chain or other addresses/topics |
 | `echo 137 > /tmp/lh-state/chainid`, run again | the same error |
-| stop the daemon | error reaching the query server; cursor unchanged |
+| stop the daemon | error reaching the query server, cursor unchanged (`--once` exits; without it the watcher retries) |
 | `cat /tmp/lh-state/lastfilter.json` | the address list and, with `topics` set, `"topics": [[...]]` |
 | `loghaven trace 0x…03de --app ethereum` | the event for block 990 (`%064x` of 990) |
 
@@ -128,4 +128,54 @@ followed by the number, digits written as `a`..`j` (transaction 105 is `S…Sbaf
 | `echo 1 > /tmp/lh-sol-state/big` | recorded, `logs_truncated: true` |
 | `echo AAAA… > /tmp/lh-sol-state/genesis` | error: cursor was saved for another cluster; exit code 1 |
 | stop the mock node | error without the RPC URL |
-| stop the daemon | error reaching the query server; cursor unchanged |
+| stop the daemon | error reaching the query server, cursor unchanged (`--once` exits; without it the watcher retries) |
+
+### `ws_url` against anvil
+
+Anvil serves HTTP and WebSocket on one port. Start it with `anvil --block-time 2`, deploy a
+contract that emits an event, and set in `[chains.ethereum]`:
+
+```toml
+rpc_url = "http://127.0.0.1:8545"
+ws_url = "ws://127.0.0.1:8545"
+poll_interval_secs = 60
+confirmations = 0
+```
+
+| Try | Expect |
+|-----|--------|
+| `loghaven watch ethereum`, then send a transaction to the contract | the banner says `new blocks over WebSocket`; `Recorded 1 event(s)` within a few seconds, not after 60 |
+| remove `ws_url`, restart, send a transaction | nothing for up to 60 seconds |
+| set `ws_url = "ws://127.0.0.1:8545/nope"` | a warning `websocket connect failed: HTTP error: 404`; events still arrive on the interval |
+| stop anvil while watching | warnings once per kind, no crash; the watcher recovers when anvil is back |
+
+### `watch stellar` against the fake Horizon
+
+```bash
+mkdir /tmp/lh-xlm-state && echo 100 > /tmp/lh-xlm-state/tip
+python3 scripts/mock_horizon.py /tmp/lh-xlm-state &
+```
+
+Add to `config.toml` (and set `enabled = ["stellar"]` in the existing `[chains]`):
+
+```toml
+[chains.stellar]
+horizon_url = "http://127.0.0.1:18000"
+accounts = ["GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7"]
+max_records = 30
+```
+
+Transaction `n` has hash `%064x` of `n`; every 7th failed.
+
+| Try | Expect |
+|-----|--------|
+| `loghaven watch stellar --once` | nothing recorded; `stellar.cursor` holds the newest token (transaction 100 is `409600`) |
+| `echo 110 > /tmp/lh-xlm-state/tip`, run again | `Recorded 10 event(s)` |
+| the same again | nothing new |
+| `echo 200 > /tmp/lh-xlm-state/tip`, run three times | 30 events each time, then caught up |
+| `loghaven trace $(printf '%064x' 105) --app stellar` | one `error` record, `failed` in the message |
+| `echo 1 > /tmp/lh-xlm-state/bigmemo` | recorded, memo cut at 128 characters |
+| `echo 503 > /tmp/lh-xlm-state/status` | error `HTTP 503 Service Unavailable`; cursor unchanged |
+| `echo Public > /tmp/lh-xlm-state/passphrase` | error: cursor was saved for another network; exit code 1 |
+| stop the daemon | error reaching the query server, cursor unchanged (`--once` exits; without it the watcher retries) |
+

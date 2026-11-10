@@ -8,6 +8,7 @@
 
 use crate::chain::rpc::{HttpRpc, Rpc};
 use crate::chain::watch::{Step, Watcher};
+use crate::chain::ws::Heads;
 use crate::client::ClientRecord;
 use crate::config::EthereumConfig;
 use crate::error::{LogHavenError, Result};
@@ -246,11 +247,15 @@ pub struct EthereumWatcher<R> {
     rpc: R,
     cfg: EthereumConfig,
     bound: Option<String>,
+    heads: Option<Heads>,
 }
 
 impl EthereumWatcher<HttpRpc> {
     pub fn new(cfg: EthereumConfig) -> Result<Self> {
-        Ok(Self::with_rpc(HttpRpc::new(&cfg.rpc_url)?, cfg))
+        let heads = cfg.ws_url.as_deref().map(Heads::new);
+        let mut watcher = Self::with_rpc(HttpRpc::new(&cfg.rpc_url)?, cfg);
+        watcher.heads = heads;
+        Ok(watcher)
     }
 }
 
@@ -260,6 +265,7 @@ impl<R: Rpc> EthereumWatcher<R> {
             rpc,
             cfg,
             bound: None,
+            heads: None,
         }
     }
 }
@@ -275,10 +281,22 @@ impl<R: Rpc> Watcher for EthereumWatcher<R> {
 
     fn describe(&self) -> String {
         format!(
-            "{} address(es) as app '{}'",
+            "{} address(es) as app '{}'{}",
             self.cfg.addresses.len(),
-            self.cfg.app
+            self.cfg.app,
+            if self.heads.is_some() {
+                " (new blocks over WebSocket)"
+            } else {
+                ""
+            }
         )
+    }
+
+    async fn wait(&mut self, interval: std::time::Duration) {
+        match &mut self.heads {
+            Some(heads) => heads.wait(interval).await,
+            None => tokio::time::sleep(interval).await,
+        }
     }
 
     async fn step(&mut self, cursor: Option<&str>) -> Result<Step> {

@@ -9,7 +9,7 @@
 //! `metadata.block_time`. The cursor holds the newest recorded signature per address.
 
 use crate::chain::rpc::{HttpRpc, Rpc};
-use crate::chain::watch::{Step, Watcher};
+use crate::chain::watch::{Step, Watcher, take_counts};
 use crate::client::ClientRecord;
 use crate::config::{SolanaConfig, is_base58};
 use crate::error::{LogHavenError, Result};
@@ -243,32 +243,6 @@ async fn fetch(
     ))
 }
 
-/// How many entries of each backlog to take. At most `max` each, and never past
-/// the slot where the busiest capped address stops, so a transaction that touches
-/// several addresses is taken together in one poll. A slot split by the cap is left
-/// for the next poll, unless it is the only slot there is.
-fn take_counts(pendings: &[&[SigInfo]], max: usize) -> Vec<usize> {
-    if pendings.len() < 2 {
-        return pendings.iter().map(|p| p.len().min(max)).collect();
-    }
-    let mut horizon: Option<u64> = None;
-    for p in pendings.iter().filter(|p| p.len() > max) {
-        let last = p[max - 1].slot;
-        let own = p[..max]
-            .iter()
-            .rposition(|i| i.slot != last)
-            .map_or(last, |k| p[k].slot);
-        horizon = Some(horizon.map_or(own, |h| h.min(own)));
-    }
-    pendings
-        .iter()
-        .map(|p| match horizon {
-            Some(h) => p.partition_point(|i| i.slot <= h).min(max),
-            None => p.len(),
-        })
-        .collect()
-}
-
 /// Program logs cut to line and total budgets; the flag says whether anything was dropped.
 fn bounded_logs(meta: &Value) -> (Vec<String>, usize, bool) {
     let lines: Vec<&str> = meta
@@ -382,6 +356,14 @@ pub async fn poll_with(
         });
     };
 
+    // Addresses are read one after another, so a transaction that lands in between must
+    // not be seen through one now and through the other later: nothing above the
+    // finalized slot read here is taken in this poll.
+    let ceiling = rpc
+        .call("getSlot", json!([{"commitment": "finalized"}]))
+        .await?
+        .as_u64()
+        .ok_or_else(|| LogHavenError::Daemon("rpc getSlot: result is not a slot".into()))?;
     let mut records = vec![];
     let mut listed = vec![];
     for address in addresses {
@@ -390,10 +372,11 @@ pub async fn poll_with(
         if skipped {
             records.push(gap_record(address));
         }
-        listed.push((address, until, pending));
+        let within = pending.partition_point(|i| i.slot <= ceiling);
+        listed.push((address, until, pending[..within].to_vec()));
     }
     let slices: Vec<&[SigInfo]> = listed.iter().map(|(_, _, p)| p.as_slice()).collect();
-    let counts = take_counts(&slices, max);
+    let counts = take_counts(&slices, max, |i| i.slot);
 
     let mut seen = BTreeSet::new();
     let mut more = false;

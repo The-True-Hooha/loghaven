@@ -332,6 +332,9 @@ fn validation_rejects_bad_settings() {
     assert!(c(&|e| e.max_block_range = 0));
     assert!(c(&|e| e.max_block_range = 10_001));
     assert!(c(&|e| e.app = "../x".into()));
+    assert!(c(&|e| e.ws_url = Some("http://x".into())));
+    assert!(!c(&|e| e.ws_url = Some("wss://x/KEY".into())));
+    assert!(!c(&|e| e.ws_url = Some("ws://127.0.0.1:8546".into())));
 }
 
 #[test]
@@ -449,4 +452,64 @@ fn watcher_warns_once_about_a_cursor_without_binding() {
     let step = block_on(w.step(Some("110\n"))).unwrap();
     assert!(step.notice.unwrap().contains("older version"));
     assert!(Cursor::parse(&step.cursor).unwrap().binding.is_some());
+}
+
+#[test]
+fn a_websocket_url_in_the_settings_makes_the_watcher_listen_for_blocks() {
+    let with = |ws: Option<&str>| {
+        let c = EthereumConfig {
+            ws_url: ws.map(str::to_string),
+            ..cfg()
+        };
+        EthereumWatcher::new(c).unwrap()
+    };
+    assert!(with(None).heads.is_none());
+    let w = with(Some("ws://127.0.0.1:1/KEY"));
+    assert!(w.heads.is_some());
+    assert!(w.describe().contains("WebSocket") && !w.describe().contains("KEY"));
+    assert!(!with(None).describe().contains("WebSocket"));
+}
+
+#[tokio::test]
+async fn a_watcher_with_a_dead_websocket_still_waits_the_interval() {
+    let c = EthereumConfig {
+        ws_url: Some("ws://127.0.0.1:1/KEY".into()),
+        ..cfg()
+    };
+    let mut w = EthereumWatcher::new(c).unwrap();
+    let t = std::time::Instant::now();
+    w.wait(std::time::Duration::from_millis(1200)).await;
+    assert!(t.elapsed() >= std::time::Duration::from_millis(1150));
+}
+
+#[tokio::test]
+async fn a_watcher_with_a_websocket_polls_as_soon_as_a_block_is_announced() {
+    use futures_util::{SinkExt, StreamExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/KEY", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (sock, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(sock).await.unwrap();
+        ws.next().await.unwrap().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let head = json!({"method": "eth_subscription", "params": {"result": {}}});
+        ws.send(tokio_tungstenite::tungstenite::Message::text(
+            head.to_string(),
+        ))
+        .await
+        .unwrap();
+        std::future::pending::<()>().await;
+    });
+    let c = EthereumConfig {
+        ws_url: Some(url),
+        ..cfg()
+    };
+    let mut w = EthereumWatcher::new(c).unwrap();
+    let t = std::time::Instant::now();
+    w.wait(std::time::Duration::from_secs(30)).await;
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        t.elapsed()
+    );
 }

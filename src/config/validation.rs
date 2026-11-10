@@ -44,13 +44,14 @@ pub fn validate(config: &Config) -> Result<()> {
                 }
                 Some(sol) => validate_solana(sol)?,
             },
-            "stellar" => {
-                if config.chains.stellar.is_none() {
+            "stellar" => match &config.chains.stellar {
+                None => {
                     return Err(LogHavenError::Config(
                         "Stellar enabled but no config provided".to_string(),
                     ));
                 }
-            }
+                Some(xlm) => validate_stellar(xlm)?,
+            },
             unknown => {
                 return Err(LogHavenError::Config(format!("Unknown chain: {}", unknown)));
             }
@@ -121,6 +122,11 @@ pub fn validate_ethereum(eth: &super::EthereumConfig) -> Result<()> {
     if !(eth.rpc_url.starts_with("http://") || eth.rpc_url.starts_with("https://")) {
         return bad("rpc_url must start with http:// or https://".into());
     }
+    if let Some(ws) = &eth.ws_url
+        && !(ws.starts_with("ws://") || ws.starts_with("wss://"))
+    {
+        return bad("ws_url must start with ws:// or wss://".into());
+    }
     crate::storage::validate_app_name(&eth.app)?;
     if eth.addresses.is_empty() {
         return bad("addresses must list at least one contract address".into());
@@ -164,6 +170,38 @@ pub fn validate_solana(sol: &super::SolanaConfig) -> Result<()> {
     }
     if !(1..=1_000).contains(&sol.max_signatures) {
         return bad("max_signatures must be between 1 and 1000".into());
+    }
+    Ok(())
+}
+
+/// A Stellar account id: `G` and 55 base32 characters.
+pub fn is_stellar_account(s: &str) -> bool {
+    s.len() == 56
+        && s.starts_with('G')
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b))
+}
+
+/// Checked when the chain is enabled and again by `loghaven watch stellar`.
+pub fn validate_stellar(xlm: &super::StellarConfig) -> Result<()> {
+    let bad = |msg: String| Err(LogHavenError::Config(format!("chains.stellar: {msg}")));
+    if !(xlm.horizon_url.starts_with("http://") || xlm.horizon_url.starts_with("https://")) {
+        return bad("horizon_url must start with http:// or https://".into());
+    }
+    crate::storage::validate_app_name(&xlm.app)?;
+    if xlm.accounts.is_empty() {
+        return bad("accounts must list at least one account id".into());
+    }
+    if let Some(a) = xlm.accounts.iter().find(|a| !is_stellar_account(a)) {
+        return bad(format!(
+            "'{a}' is not a Stellar account id (G..., 56 characters)"
+        ));
+    }
+    if xlm.poll_interval_secs == 0 {
+        return bad("poll_interval_secs must be at least 1".into());
+    }
+    if !(1..=1_000).contains(&xlm.max_records) {
+        return bad("max_records must be between 1 and 1000".into());
     }
     Ok(())
 }
