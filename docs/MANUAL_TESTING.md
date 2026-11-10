@@ -210,3 +210,29 @@ loghaven tui --app web --app api
 | `kill <pid>` of the tui from another terminal | the terminal is restored |
 | `loghaven tui --app web < /dev/null` | error: needs an interactive terminal |
 
+## Phase 3: `dashboard`
+
+Run with the daemon up and `flush_interval_secs = 1`. Send some records first:
+
+```bash
+TX=0x$(printf 'ab%.0s' $(seq 32))
+loghaven send web "first line"
+loghaven send web "payment confirmed" --level warn --chain ethereum --tx-hash $TX
+loghaven send web '<img src=x onerror=alert(1)>' --level error --tx-hash $TX
+loghaven dashboard --app web
+```
+
+| Try | Expect |
+|-----|--------|
+| the command | the browser opens `/dashboard`; the address bar shows no `#token=` |
+| the `<img ...>` record | shown as plain text; no alert, no image |
+| send another record | it appears within a few seconds |
+| Pause, send another | the list does not change until Resume (changing a filter while paused also shows what arrived) |
+| level `error` | only the error record |
+| text `payment` | only matching records |
+| click a record | detail panel with every field |
+| click the `payment` record, Trace tx hash | the records of `web` with that hash, oldest last; Esc or Close goes back |
+| `loghaven dashboard --app web --no-open` | stdout is one URL ending in `token=...` and nothing else |
+| `loghaven dashboard --app web --ttl-secs 5`, wait | the page shows the expired-session message and stops polling |
+| `curl -H 'Host: evil.example' localhost:9200/dashboard` (also `/logs?app=web`) | `403` |
+| `loghaven dashboard --app Bad/App` | error: invalid app name, no browser |

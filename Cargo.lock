@@ -2366,6 +2366,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "toml",
+ "tower",
  "uuid",
 ]
 

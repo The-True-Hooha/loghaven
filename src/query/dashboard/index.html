@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>LogHaven</title>
+<link rel="stylesheet" href="/dashboard/app.css">
+</head>
+<body>
+<header>
+  <strong id="title">LogHaven</strong>
+  <label>Level
+    <select id="level">
+      <option value="all">all</option>
+      <option value="error">error</option>
+      <option value="warn">warn+</option>
+      <option value="info">info+</option>
+    </select>
+  </label>
+  <input id="text" type="search" placeholder="filter text, source or tx hash" autocomplete="off">
+  <button id="follow" type="button">Pause</button>
+  <span id="status" role="status"></span>
+</header>
+<div id="banner" hidden></div>
+<main>
+  <table>
+    <thead><tr><th>Time (UTC)</th><th>Level</th><th>Source</th><th>Message</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <p id="empty" hidden>No records match.</p>
+  <aside id="detail" hidden>
+    <button id="close" type="button">Close</button>
+    <button id="trace" type="button" hidden>Trace tx hash</button>
+    <dl id="fields"></dl>
+  </aside>
+</main>
+<script src="/dashboard/app.js"></script>
+</body>
+</html>

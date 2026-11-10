@@ -655,6 +655,85 @@ pub fn send(
     Ok(())
 }
 
+/// `#app=..&token=..` goes in the fragment, which a browser never sends to any server.
+fn dashboard_url(port: u16, app: &str, token: Option<&str>, lookback_ms: i64) -> String {
+    let mut url = format!("http://127.0.0.1:{port}/dashboard#app={app}&lookback={lookback_ms}");
+    if let Some(t) = token {
+        url.push_str("&token=");
+        url.push_str(t);
+    }
+    url
+}
+
+fn open_browser(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler");
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    let status = cmd
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("opener exited with {status}")))
+    }
+}
+
+pub fn dashboard(
+    app: String,
+    ttl_secs: u64,
+    no_open: bool,
+    profile: Option<&str>,
+) -> Result<()> {
+    if ttl_secs == 0 || ttl_secs > MAX_TOKEN_TTL_SECS {
+        return Err(crate::error::LogHavenError::Config(format!(
+            "ttl-secs must be between 1 and {MAX_TOKEN_TTL_SECS}"
+        )));
+    }
+    crate::storage::validate_app_name(&app)?;
+    let cfg = Config::load(&config::get_config_path(profile))?;
+    let rt = tokio::runtime::Runtime::new()?;
+    let token = if cfg.auth.require_auth {
+        let s = rt.block_on(crate::client::open_session(&cfg, &app, ttl_secs))?;
+        Some((s.token_id, s.expires_in_secs))
+    } else {
+        None
+    };
+    let lookback_ms = (cfg.storage.local.flush_interval_secs as i64 * 2 + 5) * 1000;
+    let url = dashboard_url(
+        cfg.auth.query_port,
+        &app,
+        token.as_ref().map(|(t, _)| t.as_str()),
+        lookback_ms,
+    );
+    // stdout carries only the URL with --no-open so it can be captured
+    if no_open {
+        println!("{url}");
+        return Ok(());
+    }
+    if let Some((_, secs)) = &token {
+        style::info(&format!("Dashboard session for '{app}' lasts {secs}s"));
+    }
+    match open_browser(&url) {
+        Ok(()) => style::success("Opened the dashboard in your browser"),
+        Err(e) => {
+            style::warning(&format!("Could not open a browser ({e}); open this URL:"));
+            println!("{url}");
+        }
+    }
+    Ok(())
+}
+
 pub fn auth_token(app: String, ttl_secs: u64, profile: Option<&str>) -> Result<()> {
     if ttl_secs == 0 || ttl_secs > MAX_TOKEN_TTL_SECS {
         return Err(crate::error::LogHavenError::Config(format!(
@@ -722,6 +801,16 @@ pub fn auth_public_key(profile: Option<&str>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dashboard_url_keeps_the_token_in_the_fragment() {
+        let url = super::dashboard_url(9200, "web", Some("abc123"), 15000);
+        let (before, after) = url.split_once('#').unwrap();
+        assert_eq!(before, "http://127.0.0.1:9200/dashboard");
+        assert_eq!(after, "app=web&lookback=15000&token=abc123");
+        let open = super::dashboard_url(9200, "web", None, 15000);
+        assert!(!open.contains("token"), "{open}");
+    }
+
     use super::*;
 
     #[test]

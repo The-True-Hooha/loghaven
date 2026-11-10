@@ -122,6 +122,7 @@ Every command accepts `--profile <NAME>` to use `<NAME>.toml` instead of `config
 | `loghaven watch ethereum [--once]` | Poll Ethereum contract logs and record them as logs (settings in `[chains.ethereum]`, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#chainsethereum)). |
 | `loghaven watch solana [--once]` | Poll finalized Solana transactions for configured addresses and record them as logs (settings in `[chains.solana]`, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#chainssolana)). |
 | `loghaven watch stellar [--once]` | Poll Stellar account transactions from a Horizon server and record them as logs (settings in `[chains.stellar]`, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#chainsstellar)). |
+| `loghaven dashboard --app <APP> [--ttl-secs N] [--no-open]` | Open the web dashboard for one app in your browser (see [Web dashboard](#web-dashboard)). |
 | `loghaven tui --app <APP> [--app <APP>...] [--token T]` | Live terminal view of one or more apps' logs (see [Terminal UI](#terminal-ui)). Needs an interactive terminal. |
 | `loghaven trace <TX_HASH> --app <APP> [--app <APP>...]` | Show the records that carry one transaction hash, oldest first, merged across the apps you name. Options: `--from MS`, `--to MS`, `--limit` (default 1000: newest N per app and overall), `--token` (one app only). `0x`+hex hashes match ignoring case (they are stored lowercase in chunks written after v0.2.0); other chains match exactly. |
 | `loghaven logs <APP> [options]` | Query records. Options: `--level`, `--source`, `--from MS`, `--to MS`, `--text`, `--limit` (default 100), `--token`, `--follow`. |
@@ -257,6 +258,14 @@ Filters apply to what is on screen: the loaded records, or the trace's records. 
 Times are UTC. Log content is untrusted, so control, line-separator, zero-width and bidirectional-override characters are shown as `·` and long runs of combining marks are cut.
 The terminal is restored on quit, Ctrl+C, SIGTERM, SIGHUP and a panic. `kill -9` cannot be caught: run `reset` afterwards.
 
+## Web dashboard
+
+`loghaven dashboard --app web` opens `http://127.0.0.1:9200/dashboard` in your browser. The daemon serves the page itself, so there is nothing else to run; it needs the daemon up like `logs` does.
+
+When `require_auth` is on, the command opens a session for that app (`--ttl-secs`, default 8 hours) and puts the token in the URL fragment (`#token=...`). A browser never sends the fragment to a server, so the token does not reach the daemon's logs or a proxy, and the page removes it from the address bar as soon as it loads; it then keeps it in memory only. The session belongs to one app, like every session. When it expires the page says so and you run the command again. The token is also an argument of the browser-opening command for a moment, so other local users can see it in the process list; use a short `--ttl-secs` on a shared machine. `--no-open` prints the URL instead of opening it; the URL contains the token, so treat it like one.
+
+The page shows the newest 200 records, then follows new ones with the same lookback as `logs --follow`. It has a level filter (all, error, warn and up, info and up), a text filter over message, source and tx hash, pause/resume, and a detail panel per record. **Trace tx hash** lists the records of that app with the same hash. Log text is shown as text, never as HTML. The page and its script come with a strict Content-Security-Policy, and the query server refuses any `Host` other than `127.0.0.1`, `localhost` or `[::1]` on every route, so a web page cannot reach the logs by DNS rebinding. The dashboard does not trace across apps (one session is one app); use `loghaven trace` for that.
+
 ## Roadmap
 
 LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
@@ -297,7 +306,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 ### Phase 3 - Interfaces
 
 - Done: terminal UI (`loghaven tui`)
-- Local web dashboard on the query API
+- Done: local web dashboard (`loghaven dashboard`)
 
 ### Phase 4 - Production hardening
 
