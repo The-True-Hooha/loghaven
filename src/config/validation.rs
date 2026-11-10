@@ -36,13 +36,14 @@ pub fn validate(config: &Config) -> Result<()> {
                 }
                 Some(eth) => validate_ethereum(eth)?,
             },
-            "solana" => {
-                if config.chains.solana.is_none() {
+            "solana" => match &config.chains.solana {
+                None => {
                     return Err(LogHavenError::Config(
                         "Solana enabled but no config provided".to_string(),
                     ));
                 }
-            }
+                Some(sol) => validate_solana(sol)?,
+            },
             "stellar" => {
                 if config.chains.stellar.is_none() {
                     return Err(LogHavenError::Config(
@@ -135,6 +136,34 @@ pub fn validate_ethereum(eth: &super::EthereumConfig) -> Result<()> {
     }
     if !(1..=10_000).contains(&eth.max_block_range) {
         return bad("max_block_range must be between 1 and 10000".into());
+    }
+    Ok(())
+}
+
+/// Base58 text of a 32-byte address is 32 to 44 characters.
+pub fn is_base58(s: &str, min_len: usize, max_len: usize) -> bool {
+    const ALPHABET: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    (min_len..=max_len).contains(&s.len()) && s.chars().all(|c| ALPHABET.contains(c))
+}
+
+/// Checked when the chain is enabled and again by `loghaven watch solana`.
+pub fn validate_solana(sol: &super::SolanaConfig) -> Result<()> {
+    let bad = |msg: String| Err(LogHavenError::Config(format!("chains.solana: {msg}")));
+    if !(sol.rpc_url.starts_with("http://") || sol.rpc_url.starts_with("https://")) {
+        return bad("rpc_url must start with http:// or https://".into());
+    }
+    crate::storage::validate_app_name(&sol.app)?;
+    if sol.addresses.is_empty() {
+        return bad("addresses must list at least one account or program address".into());
+    }
+    if let Some(a) = sol.addresses.iter().find(|a| !is_base58(a, 32, 44)) {
+        return bad(format!("'{a}' is not a base58 address"));
+    }
+    if sol.poll_interval_secs == 0 {
+        return bad("poll_interval_secs must be at least 1".into());
+    }
+    if !(1..=1_000).contains(&sol.max_signatures) {
+        return bad("max_signatures must be between 1 and 1000".into());
     }
     Ok(())
 }

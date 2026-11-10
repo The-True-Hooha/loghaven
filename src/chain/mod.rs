@@ -2,3 +2,6 @@
 //! process (`loghaven watch <chain>`) and send through the normal signed ingest path.
 
 pub mod ethereum;
+pub mod rpc;
+pub mod solana;
+pub mod watch;

@@ -176,6 +176,83 @@ How it behaves:
 - The RPC URL is never printed in errors, because it often contains an API key.
   It is stored in plain text in `config.toml`.
 
+### `[chains.solana]`
+
+```toml
+[chains]
+enabled = ["solana"]
+
+[chains.solana]
+rpc_url = "https://solana-mainnet.example/KEY"   # http(s) JSON-RPC endpoint
+app = "solana"                  # app the transactions are recorded under (default)
+addresses = ["..."]             # account or program addresses (base58); at least one
+poll_interval_secs = 5          # wait between polls once caught up
+max_signatures = 100            # most transactions per address in one poll (1 to 1000)
+```
+
+Run it with `loghaven watch solana` (the daemon must be running). It is a
+separate process: stop it with Ctrl+C. `--once` reads what is available and
+exits.
+
+How it behaves:
+
+- Every finalized transaction that touches a watched address becomes one record
+  with `chain = "solana"`, `source = "solana"` and the signature as `tx_hash`,
+  so `loghaven trace <signature> --app solana --app web` lines it up with your
+  own logs. The level is `error` for a failed transaction and `info` otherwise.
+  Slot, block time, fee, compute units and the program logs are in `metadata`.
+  Signatures are case sensitive and are matched exactly.
+- Only finalized transactions are read, so there is no reorg window and no
+  `confirmations` setting.
+- The first run starts at the current tip and records nothing from before.
+  There is no way to replay older history yet.
+- The newest recorded signature per address is kept in `solana.cursor` next to
+  `config.toml`: the first line is a fingerprint of the cluster and the address
+  list, then one `<address> <signature> <slot>` line per address. An address with
+  no line (it had no transactions at the first run) is read from its newest
+  10000 transactions. A file that does not parse stops the watcher with an
+  error instead of guessing.
+- If the node lists history older than the saved slot, it does not know the saved
+  signature yet (a lagging or load-balanced node). The poll fails and is retried
+  instead of recording old transactions again.
+- If you change the addresses, or point `rpc_url` at another cluster, the watcher
+  stops with an error instead of continuing from a signature that no longer
+  fits. Delete `solana.cursor` to start again from the current tip.
+- A transaction that touches two watched addresses is recorded once. With
+  several addresses, a poll stops at the slot where the most backlogged address
+  stops, so such a transaction is taken by all of them together. Only a single
+  slot holding more than `max_signatures` transactions for one address can still
+  split one across polls.
+- Per poll and address, at most `max_signatures` transactions are recorded,
+  oldest first, and the next poll continues. If more than 10000 transactions
+  are waiting (a long outage), the oldest ones are skipped and one record with
+  level `warn` and no `tx_hash` says so.
+- Each program log line is cut at 512 characters and the logs of one
+  transaction at about 4 KB; `metadata.log_count` has the real count and
+  `metadata.logs_truncated` is set.
+- If `getTransaction` fails, or returns nothing for a transaction under ten
+  minutes old (a node that is behind), the poll fails and is retried on the
+  next interval. After 5 tries the transaction is recorded with
+  `metadata.logs_available = false` and `metadata.logs_error` (the error, or
+  empty for a missing one), and the watcher moves on; those logs are not
+  fetched later. A transaction older than ten minutes that the node no longer
+  has (pruned history) is recorded without logs at once. The tries are counted
+  in memory, so a restart starts counting again.
+- During a catch-up the backlog is listed once and then worked through from
+  memory, so new transactions on an address show up after the catch-up ends.
+  A restart lists it again.
+- Delivery is best effort, with the same limits as the Ethereum adapter: the
+  watcher stops with an error and keeps its cursor when the daemon cannot be
+  reached, a record the daemon drops after the datagram is sent is not re-sent,
+  and a crash between sending and saving the cursor can send events again. A
+  settings or cursor-file error stops the watcher; network errors are retried.
+- The node must support `getSignaturesForAddress`, `getTransaction` and
+  `getGenesisHash`. Public nodes limit how much history they keep and how fast
+  you may call them: one `getTransaction` call is made per recorded transaction.
+- `ws_url` is accepted but unused; the adapter polls over HTTP.
+- The RPC URL is never printed in errors, because it often contains an API key.
+  It is stored in plain text in `config.toml`.
+
 ## Environment variables
 
 | Variable | Overrides |

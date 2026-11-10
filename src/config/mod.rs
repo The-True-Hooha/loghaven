@@ -1,6 +1,6 @@
 mod defaults;
 mod validation;
-pub use validation::validate_ethereum;
+pub use validation::{is_base58, validate_ethereum, validate_solana};
 
 use crate::error::{LogHavenError, Result};
 use serde::{Deserialize, Serialize};
@@ -178,7 +178,19 @@ pub struct EthereumConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolanaConfig {
     pub rpc_url: String,
+    /// Not used yet: the adapter polls `rpc_url` over HTTP.
     pub ws_url: Option<String>,
+    /// App the chain events are recorded under.
+    #[serde(default = "defaults::solana_app")]
+    pub app: String,
+    /// Account or program addresses (base58) whose transactions are recorded. At least one is required.
+    #[serde(default)]
+    pub addresses: Vec<String>,
+    #[serde(default = "defaults::solana_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    /// Most transactions recorded per address in one poll; a larger backlog takes several polls.
+    #[serde(default = "defaults::solana_max_signatures")]
+    pub max_signatures: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

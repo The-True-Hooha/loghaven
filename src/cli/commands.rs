@@ -562,15 +562,8 @@ pub fn trace(
     })
 }
 
-/// Settings and cursor-file problems need a person; network problems may pass.
-fn is_fatal_watch_error(e: &crate::error::LogHavenError) -> bool {
-    matches!(e, crate::error::LogHavenError::Config(_))
-}
-
 pub fn watch_ethereum(once: bool, profile: Option<&str>) -> Result<()> {
-    use crate::chain::ethereum::{
-        HttpRpc, binding, check_binding, poll, read_cursor, write_cursor,
-    };
+    use crate::chain::{ethereum::EthereumWatcher, watch};
 
     let config_path = config::get_config_path(profile);
     let cfg = Config::load(&config_path)?;
@@ -581,87 +574,40 @@ pub fn watch_ethereum(once: bool, profile: Option<&str>) -> Result<()> {
     })?;
     config::validate_ethereum(&eth)?;
     let cursor_path = config_path.with_file_name("ethereum.cursor");
-    let rpc = HttpRpc::new(&eth.rpc_url)?;
+    let mut watcher = EthereumWatcher::new(eth)?;
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        style::info(&format!(
-            "Watching {} address(es) as app '{}'; Ctrl+C to stop",
-            eth.addresses.len(),
-            eth.app
-        ));
-        let mut last_warning = String::new();
-        let mut bound: Option<String> = None;
-        loop {
-            let step_fut = async {
-                let cursor = read_cursor(&cursor_path)?;
-                let batch = tokio::select! {
-                    _ = tokio::signal::ctrl_c() => return Ok(None),
-                    b = async {
-                        let current = match &bound {
-                            Some(b) => b.clone(),
-                            None => binding(&rpc, &eth).await?,
-                        };
-                        if let Some(c) = &cursor {
-                            check_binding(c, &current)?;
-                            if c.binding.is_none() {
-                                style::warning(
-                                    "ethereum.cursor has no chain/address record (older version); \
-                                     adopting the current settings",
-                                );
-                            }
-                        }
-                        let batch = poll(&rpc, &eth, cursor.map(|c| c.next_block)).await?;
-                        Ok::<_, crate::error::LogHavenError>((batch, current))
-                    } => b?,
-                };
-                let (batch, current) = batch;
-                bound = Some(current.clone());
-                // not cancellable: the cursor must follow a send that has started
-                if !batch.records.is_empty() {
-                    let mut client =
-                        crate::client::IngestClient::connect(&cfg, &eth.app, SESSION_TTL_SECS)
-                            .await?;
-                    client.send(&batch.records).await?;
-                    style::info(&format!("Recorded {} event(s)", batch.records.len()));
-                }
-                write_cursor(&cursor_path, batch.next_block, &current)?;
-                Ok::<_, crate::error::LogHavenError>(Some(batch.more))
-            };
-            let step = match step_fut.await {
-                Ok(None) => return Ok(()),
-                Ok(Some(more)) => Ok(more),
-                Err(e) => Err(e),
-            };
-            let more = match step {
-                Ok(more) => {
-                    last_warning.clear();
-                    more
-                }
-                // the node or daemon may be down for a while; retry, saying each problem once
-                Err(e) => {
-                    if once || is_fatal_watch_error(&e) {
-                        return Err(e);
-                    }
-                    let msg = e.to_string();
-                    if msg != last_warning {
-                        style::warning(&msg);
-                        last_warning = msg;
-                    }
-                    false
-                }
-            };
-            if once && !more {
-                return Ok(());
-            }
-            if !more {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => return Ok(()),
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(eth.poll_interval_secs)) => {}
-                }
-            }
-        }
-    })
+    rt.block_on(watch::run(
+        &mut watcher,
+        &cfg,
+        &cursor_path,
+        once,
+        SESSION_TTL_SECS,
+    ))
+}
+
+pub fn watch_solana(once: bool, profile: Option<&str>) -> Result<()> {
+    use crate::chain::{solana::SolanaWatcher, watch};
+
+    let config_path = config::get_config_path(profile);
+    let cfg = Config::load(&config_path)?;
+    let sol = cfg.chains.solana.clone().ok_or_else(|| {
+        crate::error::LogHavenError::Config(
+            "no [chains.solana] section in the config; see docs/CONFIGURATION.md".into(),
+        )
+    })?;
+    config::validate_solana(&sol)?;
+    let cursor_path = config_path.with_file_name("solana.cursor");
+    let mut watcher = SolanaWatcher::new(sol)?;
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(watch::run(
+        &mut watcher,
+        &cfg,
+        &cursor_path,
+        once,
+        SESSION_TTL_SECS,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -855,12 +801,5 @@ mod tests {
         };
         assert_eq!(ids(merge_trace(input(), 10)), ["m", "z", "a", "b"]);
         assert_eq!(ids(merge_trace(input(), 2)), ["a", "b"]);
-    }
-
-    #[test]
-    fn watch_stops_on_config_errors_but_retries_network_errors() {
-        use crate::error::LogHavenError;
-        assert!(is_fatal_watch_error(&LogHavenError::Config("x".into())));
-        assert!(!is_fatal_watch_error(&LogHavenError::Daemon("x".into())));
     }
 }
