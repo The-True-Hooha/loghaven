@@ -3,6 +3,9 @@
 //! The wire format is documented in `docs/WIRE_FORMAT.md`.
 
 pub mod follow;
+mod query_token;
+
+pub use query_token::QueryToken;
 
 use crate::auth::session::sign_datagram;
 use crate::auth::token::issue_jwt;

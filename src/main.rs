@@ -13,6 +13,7 @@ mod error;
 mod ingest;
 mod ipc;
 mod storage;
+mod tui;
 
 fn main() {
     let cli = Cli::parse();

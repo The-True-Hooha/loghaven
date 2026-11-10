@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use super::style;
 use crate::auth::keys::generate_keypair;
+use crate::client::QueryToken;
 use crate::config::{self, Config};
 use crate::error::Result;
 
@@ -340,36 +341,6 @@ fn print_record(r: &crate::storage::record::LogRecord) {
     println!("{line}");
 }
 
-/// A query token that is minted on demand and renewed at 80% of the lifetime
-/// the daemon actually granted.
-struct QueryToken<'a> {
-    cfg: &'a Config,
-    app: &'a str,
-    explicit: Option<String>,
-    current: Option<(String, std::time::Instant)>,
-}
-
-impl QueryToken<'_> {
-    async fn get(&mut self) -> Result<Option<String>> {
-        if let Some(t) = &self.explicit {
-            return Ok(Some(t.clone()));
-        }
-        if !self.cfg.auth.require_auth {
-            return Ok(None);
-        }
-        let stale = self
-            .current
-            .as_ref()
-            .is_none_or(|(_, renew_at)| std::time::Instant::now() >= *renew_at);
-        if stale {
-            let s = crate::client::open_session(self.cfg, self.app, SESSION_TTL_SECS).await?;
-            let renew_in = std::time::Duration::from_secs(s.expires_in_secs * 4 / 5);
-            self.current = Some((s.token_id, std::time::Instant::now() + renew_in));
-        }
-        Ok(self.current.as_ref().map(|(t, _)| t.clone()))
-    }
-}
-
 const FOLLOW_PAGE: usize = 1000;
 const FOLLOW_MAX_PAGE: usize = 10_000;
 
@@ -394,12 +365,7 @@ pub fn logs(
     let config_path = config::get_config_path(profile);
     let cfg = Config::load(&config_path)?;
     let port = cfg.auth.query_port;
-    let mut tok = QueryToken {
-        cfg: &cfg,
-        app: &app,
-        explicit: token,
-        current: None,
-    };
+    let mut tok = QueryToken::new(&cfg, &app, token, SESSION_TTL_SECS);
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
@@ -531,12 +497,7 @@ pub fn trace(
     rt.block_on(async {
         let mut all = Vec::new();
         for app in &apps {
-            let mut tok = QueryToken {
-                cfg: &cfg,
-                app,
-                explicit: token.clone(),
-                current: None,
-            };
+            let mut tok = QueryToken::new(&cfg, app, token.clone(), SESSION_TTL_SECS);
             let mut params = logs_params(app, limit, &None, &None, from_ms, to_ms, &None);
             params.push(("tx_hash", tx.clone()));
             let fetched = async {
