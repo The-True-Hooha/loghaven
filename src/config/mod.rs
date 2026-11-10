@@ -1,6 +1,8 @@
 mod defaults;
 mod validation;
-pub use validation::{is_base58, validate_ethereum, validate_solana};
+pub use validation::{
+    is_base58, is_stellar_account, validate_ethereum, validate_solana, validate_stellar,
+};
 
 use crate::error::{LogHavenError, Result};
 use serde::{Deserialize, Serialize};
@@ -196,6 +198,17 @@ pub struct SolanaConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StellarConfig {
     pub horizon_url: String,
+    /// App the transactions are recorded under.
+    #[serde(default = "defaults::stellar_app")]
+    pub app: String,
+    /// Account ids (`G...`, 56 characters) whose transactions are recorded. At least one is required.
+    #[serde(default)]
+    pub accounts: Vec<String>,
+    #[serde(default = "defaults::stellar_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    /// Most transactions recorded per account in one poll; a larger backlog takes several polls.
+    #[serde(default = "defaults::stellar_max_records")]
+    pub max_records: u64,
 }
 
 impl Default for AgentConfig {

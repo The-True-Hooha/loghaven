@@ -105,3 +105,15 @@ pub fn solana_poll_interval_secs() -> u64 {
 pub fn solana_max_signatures() -> u64 {
     100
 }
+
+pub fn stellar_app() -> String {
+    "stellar".to_string()
+}
+
+pub fn stellar_poll_interval_secs() -> u64 {
+    5
+}
+
+pub fn stellar_max_records() -> u64 {
+    100
+}

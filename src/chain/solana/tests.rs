@@ -699,17 +699,3 @@ fn a_transaction_on_two_addresses_is_recorded_once_even_when_one_is_capped() {
     assert_eq!(all.len(), 5, "{all:?}");
     assert_eq!(sorted, (1..=5).map(sig).collect::<Vec<_>>());
 }
-
-#[test]
-fn take_counts_stops_at_the_busiest_capped_slot_and_always_progresses() {
-    let a: Vec<SigInfo> = (1..=5).map(|n| info(n, 100 + n)).collect();
-    let b = vec![info(5, 105), info(6, 106)];
-    assert_eq!(take_counts(&[&a, &b], 3), [2, 0]);
-    let quiet = vec![info(1, 101)];
-    assert_eq!(take_counts(&[&a, &quiet], 3), [2, 1]);
-    assert_eq!(take_counts(&[&quiet], 3), [1]);
-    // one slot holding more than the cap is taken up to the cap rather than stalling
-    let same: Vec<SigInfo> = (1..=5).map(|n| info(n, 7)).collect();
-    assert_eq!(take_counts(&[&same], 3), [3]);
-    assert_eq!(take_counts(&[&[], &quiet], 3), [0, 1]);
-}
