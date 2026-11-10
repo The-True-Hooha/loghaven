@@ -253,32 +253,20 @@ fn malformed_log_is_an_error_not_a_skip() {
 }
 
 #[test]
-fn cursor_file_round_trips_and_garbage_is_an_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("ethereum.cursor");
-    assert!(read_cursor(&p).unwrap().is_none());
-    write_cursor(&p, 42, "abc").unwrap();
-    let c = read_cursor(&p).unwrap().unwrap();
+fn cursor_text_round_trips_and_garbage_is_an_error() {
+    let c = Cursor::parse(&Cursor::render(42, "abc")).unwrap();
     assert_eq!((c.next_block, c.binding.as_deref()), (42, Some("abc")));
-    write_cursor(&p, 43, "abc").unwrap();
-    assert_eq!(read_cursor(&p).unwrap().unwrap().next_block, 43);
     for bad in ["not a number", "", "\nabc"] {
-        std::fs::write(&p, bad).unwrap();
-        assert!(read_cursor(&p).is_err(), "{bad:?}");
+        assert!(Cursor::parse(bad).is_err(), "{bad:?}");
     }
 }
 
 #[test]
 fn cursor_from_0_2_0_has_no_binding_and_is_accepted() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("ethereum.cursor");
-    std::fs::write(&p, "995").unwrap();
-    let c = read_cursor(&p).unwrap().unwrap();
+    let c = Cursor::parse("995").unwrap();
     assert_eq!((c.next_block, c.binding.as_deref()), (995, None));
     assert!(check_binding(&c, "anything").is_ok());
-    std::fs::write(&p, "995\n\n").unwrap();
-    let c = read_cursor(&p).unwrap().unwrap();
-    assert_eq!(c.binding, None);
+    assert_eq!(Cursor::parse("995\n\n").unwrap().binding, None);
 }
 
 #[test]
@@ -344,70 +332,6 @@ fn validation_rejects_bad_settings() {
     assert!(c(&|e| e.max_block_range = 0));
     assert!(c(&|e| e.max_block_range = 10_001));
     assert!(c(&|e| e.app = "../x".into()));
-}
-
-mod http {
-    use super::*;
-    use axum::{Json, Router, routing::post};
-
-    async fn serve(handler: Router) -> String {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/secret-key", l.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(l, handler).await.unwrap() });
-        url
-    }
-
-    #[tokio::test]
-    async fn http_rpc_returns_result_and_surfaces_rpc_errors() {
-        let app = Router::new().route(
-            "/secret-key",
-            post(|Json(req): Json<Value>| async move {
-                if req["method"] == "eth_blockNumber" {
-                    Json(json!({"jsonrpc":"2.0","id":1,"result":"0x2a"}))
-                } else {
-                    Json(json!({"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"range too large"}}))
-                }
-            }),
-        );
-        let rpc = HttpRpc::new(&serve(app).await).unwrap();
-        assert_eq!(
-            rpc.call("eth_blockNumber", json!([])).await.unwrap(),
-            json!("0x2a")
-        );
-        let e = rpc
-            .call("eth_getLogs", json!([]))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("range too large"), "{e}");
-    }
-
-    #[tokio::test]
-    async fn http_rpc_errors_never_contain_the_url() {
-        let app = Router::new().route(
-            "/secret-key",
-            post(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "no") }),
-        );
-        let url = serve(app).await;
-        let rpc = HttpRpc::new(&url).unwrap();
-        let e = rpc
-            .call("eth_blockNumber", json!([]))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("500") && !e.contains("secret-key"), "{e}");
-
-        let dead = HttpRpc::new("http://127.0.0.1:1/secret-key").unwrap();
-        let e = dead
-            .call("eth_blockNumber", json!([]))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            !e.contains("secret-key") && !e.contains("127.0.0.1:1/"),
-            "{e}"
-        );
-    }
 }
 
 #[test]
@@ -495,4 +419,34 @@ fn quantity_error_quotes_at_most_a_short_prefix() {
     let long = json!("x".repeat(10_000));
     let e = quantity(&long, "q").unwrap_err().to_string();
     assert!(e.len() < 300, "{}", e.len());
+}
+
+#[test]
+fn watcher_saves_a_cursor_that_names_its_binding_and_refuses_a_foreign_one() {
+    let mk = || EthereumWatcher::with_rpc(Mock::new(120, vec![log(100, 0, "0xa")]), cfg());
+    let mut w = mk();
+    let c = EthereumConfig {
+        start_block: Some(90),
+        ..cfg()
+    };
+    let mut w2 = EthereumWatcher::with_rpc(Mock::new(120, vec![log(100, 0, "0xa")]), c);
+    let step = block_on(w2.step(None)).unwrap();
+    assert_eq!(step.records.len(), 1);
+    assert!(step.notice.is_none());
+    let saved = Cursor::parse(&step.cursor).unwrap();
+    assert_eq!(saved.next_block, 115);
+    let own = saved.binding.clone().unwrap();
+
+    let foreign = Cursor::render(115, "someone-else");
+    let e = block_on(w.step(Some(&foreign))).err().unwrap().to_string();
+    assert!(e.contains("another chain"), "{e}");
+    assert!(block_on(w.step(Some(&Cursor::render(115, &own)))).is_ok());
+}
+
+#[test]
+fn watcher_warns_once_about_a_cursor_without_binding() {
+    let mut w = EthereumWatcher::with_rpc(Mock::new(120, vec![]), cfg());
+    let step = block_on(w.step(Some("110\n"))).unwrap();
+    assert!(step.notice.unwrap().contains("older version"));
+    assert!(Cursor::parse(&step.cursor).unwrap().binding.is_some());
 }

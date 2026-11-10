@@ -6,76 +6,18 @@
 //! protection. The record timestamp is the ingest time; the block time is in
 //! `metadata.block_timestamp`.
 
+use crate::chain::rpc::{HttpRpc, Rpc};
+use crate::chain::watch::{Step, Watcher};
 use crate::client::ClientRecord;
 use crate::config::EthereumConfig;
 use crate::error::{LogHavenError, Result};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::path::Path;
-use std::time::Duration;
 
 /// A cursor further ahead of the chain than this is treated as a mistake, not as waiting.
 const MAX_AHEAD: u64 = 1_000;
 /// Hex characters of event `data` kept in a record; longer data is cut so one log cannot oversize a datagram.
 const MAX_DATA_HEX: usize = 4096;
-
-pub trait Rpc {
-    async fn call(&self, method: &str, params: Value) -> Result<Value>;
-}
-
-pub struct HttpRpc {
-    url: String,
-    client: reqwest::Client,
-}
-
-impl HttpRpc {
-    pub fn new(url: &str) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .build()
-            .map_err(|e| LogHavenError::Daemon(e.to_string()))?;
-        Ok(Self {
-            url: url.to_string(),
-            client,
-        })
-    }
-}
-
-impl Rpc for HttpRpc {
-    async fn call(&self, method: &str, params: Value) -> Result<Value> {
-        let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
-        // RPC URLs often embed an API key, so the URL is kept out of every error.
-        let fail = |e: reqwest::Error| {
-            LogHavenError::Daemon(format!("rpc {method} failed: {}", e.without_url()))
-        };
-        let resp = self
-            .client
-            .post(&self.url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(fail)?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(LogHavenError::Daemon(format!(
-                "rpc {method} failed: HTTP {status}"
-            )));
-        }
-        let mut reply: Value = resp.json().await.map_err(fail)?;
-        if let Some(err) = reply.get("error") {
-            return Err(LogHavenError::Daemon(format!(
-                "rpc {method} error: {}",
-                err.get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-            )));
-        }
-        reply
-            .get_mut("result")
-            .map(Value::take)
-            .ok_or_else(|| LogHavenError::Daemon(format!("rpc {method}: reply has no result")))
-    }
-}
 
 pub struct Batch {
     pub records: Vec<ClientRecord>,
@@ -246,6 +188,35 @@ pub struct Cursor {
     pub binding: Option<String>,
 }
 
+impl Cursor {
+    /// A garbled file is an error: guessing a start block would either replay
+    /// history or skip a gap.
+    pub fn parse(text: &str) -> Result<Self> {
+        let mut lines = text.lines();
+        let next_block = lines
+            .next()
+            .and_then(|l| l.trim().parse().ok())
+            .ok_or_else(|| {
+                LogHavenError::Config(
+                    "ethereum.cursor is not a block number; fix or delete it".into(),
+                )
+            })?;
+        let binding = lines
+            .next()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(str::to_string);
+        Ok(Self {
+            next_block,
+            binding,
+        })
+    }
+
+    pub fn render(next_block: u64, binding: &str) -> String {
+        format!("{next_block}\n{binding}\n")
+    }
+}
+
 /// Identifies what a cursor was saved for: the chain and the watched addresses and topics.
 pub async fn binding(rpc: &impl Rpc, cfg: &EthereumConfig) -> Result<String> {
     use sha2::{Digest, Sha256};
@@ -271,43 +242,71 @@ pub fn check_binding(cursor: &Cursor, current: &str) -> Result<()> {
     }
 }
 
-/// `Ok(None)` only when the file does not exist. A garbled file is an error:
-/// guessing a start block would either replay history or skip a gap.
-pub fn read_cursor(path: &Path) -> Result<Option<Cursor>> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    let mut lines = text.lines();
-    let next_block = lines
-        .next()
-        .and_then(|l| l.trim().parse().ok())
-        .ok_or_else(|| {
-            LogHavenError::Config(format!(
-                "{} is not a block number; fix or delete it",
-                path.display()
-            ))
-        })?;
-    let binding = lines
-        .next()
-        .map(str::trim)
-        .filter(|b| !b.is_empty())
-        .map(str::to_string);
-    Ok(Some(Cursor {
-        next_block,
-        binding,
-    }))
+pub struct EthereumWatcher<R> {
+    rpc: R,
+    cfg: EthereumConfig,
+    bound: Option<String>,
 }
 
-pub fn write_cursor(path: &Path, next_block: u64, binding: &str) -> Result<()> {
-    use std::io::Write;
-    let tmp = path.with_extension("cursor.tmp");
-    let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(format!("{next_block}\n{binding}\n").as_bytes())?;
-    f.sync_all()?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+impl EthereumWatcher<HttpRpc> {
+    pub fn new(cfg: EthereumConfig) -> Result<Self> {
+        Ok(Self::with_rpc(HttpRpc::new(&cfg.rpc_url)?, cfg))
+    }
+}
+
+impl<R: Rpc> EthereumWatcher<R> {
+    pub fn with_rpc(rpc: R, cfg: EthereumConfig) -> Self {
+        Self {
+            rpc,
+            cfg,
+            bound: None,
+        }
+    }
+}
+
+impl<R: Rpc> Watcher for EthereumWatcher<R> {
+    fn app(&self) -> &str {
+        &self.cfg.app
+    }
+
+    fn poll_interval_secs(&self) -> u64 {
+        self.cfg.poll_interval_secs
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "{} address(es) as app '{}'",
+            self.cfg.addresses.len(),
+            self.cfg.app
+        )
+    }
+
+    async fn step(&mut self, cursor: Option<&str>) -> Result<Step> {
+        let cursor = cursor.map(Cursor::parse).transpose()?;
+        let current = match &self.bound {
+            Some(b) => b.clone(),
+            None => binding(&self.rpc, &self.cfg).await?,
+        };
+        let mut notice = None;
+        if let Some(c) = &cursor {
+            check_binding(c, &current)?;
+            if c.binding.is_none() {
+                notice = Some(
+                    "ethereum.cursor has no chain/address record (older version); \
+                     adopting the current settings"
+                        .to_string(),
+                );
+            }
+        }
+        let batch = poll(&self.rpc, &self.cfg, cursor.map(|c| c.next_block)).await?;
+        self.bound = Some(current.clone());
+        Ok(Step {
+            records: batch.records,
+            cursor: Cursor::render(batch.next_block, &current),
+            more: batch.more,
+            notice,
+        })
+    }
 }
 
 #[cfg(test)]
