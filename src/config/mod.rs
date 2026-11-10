@@ -154,7 +154,8 @@ pub struct ChainsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EthereumConfig {
     pub rpc_url: String,
-    /// Not used yet: the adapter polls `rpc_url` over HTTP.
+    /// Optional WebSocket endpoint (`ws://` or `wss://`) of the same chain. New blocks announced
+    /// there start a poll at once; reading still goes over `rpc_url`.
     pub ws_url: Option<String>,
     /// App the chain events are recorded under.
     #[serde(default = "defaults::ethereum_app")]

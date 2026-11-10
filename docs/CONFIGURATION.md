@@ -134,6 +134,7 @@ poll_interval_secs = 12         # wait between polls once caught up
 confirmations = 6               # only blocks this far behind the head are read
 max_block_range = 1000          # largest eth_getLogs span (1 to 10000)
 # start_block = 21000000        # first run only; default is the newest confirmed block
+# ws_url = "wss://eth-mainnet.example/KEY"   # optional: poll as soon as a block is announced
 ```
 
 Run it with `loghaven watch ethereum` (the daemon must be running). It is a
@@ -170,7 +171,15 @@ How it behaves:
   with an error instead of continuing from a block number that no longer fits.
   Delete `ethereum.cursor` and set `start_block` to re-read history with the new
   settings. A cursor file from 0.2.0 has no such record: it is accepted without a check, a warning is printed, and the current settings are recorded from then on. A settings or cursor-file error stops the watcher; network errors are retried. The node must support `eth_chainId`.
-- `ws_url` is accepted but unused; the adapter polls over HTTP.
+- `ws_url` (optional, `ws://` or `wss://`) turns on new-block notifications: the
+  watcher subscribes to `newHeads` and polls as soon as a block is announced,
+  instead of waiting out `poll_interval_secs`. It never polls more than once a
+  second. Reading, the cursor and `confirmations` are unchanged and still use
+  `rpc_url`, so a socket that drops, stays silent or is refused (the node
+  answers the subscription with an error) only costs latency: the watcher polls
+  on the interval and reconnects on the next wait. The URL is never printed in
+  errors. `wss://` uses the built-in root certificates; it has not been tried
+  against a public node.
 - If your node rejects a range because it holds too many logs, lower
   `max_block_range`.
 - The RPC URL is never printed in errors, because it often contains an API key.
@@ -252,6 +261,72 @@ How it behaves:
 - `ws_url` is accepted but unused; the adapter polls over HTTP.
 - The RPC URL is never printed in errors, because it often contains an API key.
   It is stored in plain text in `config.toml`.
+
+### `[chains.stellar]`
+
+```toml
+[chains]
+enabled = ["stellar"]
+
+[chains.stellar]
+horizon_url = "https://horizon.stellar.org"   # http(s) Horizon server
+app = "stellar"                 # app the transactions are recorded under (default)
+accounts = ["G..."]             # account ids to watch (G + 55 characters); at least one
+poll_interval_secs = 5          # wait between polls once caught up
+max_records = 100               # most transactions per account in one poll (1 to 1000)
+```
+
+Run it with `loghaven watch stellar` (the daemon must be running). It is a
+separate process: stop it with Ctrl+C. `--once` reads what is available and
+exits.
+
+How it behaves:
+
+- Every transaction that involves a watched account (as source, or through any of
+  its operations) becomes one record with `chain = "stellar"`, `source = "stellar"`
+  and the transaction hash as `tx_hash` (stored lowercase), so
+  `loghaven trace <hash> --app stellar --app web` lines it up with your own logs.
+  The level is `error` for a failed transaction and `info` otherwise. Ledger, close
+  time, fee charged, operation count, source account and memo are in `metadata`;
+  the memo is cut at 128 characters. The operations themselves are not fetched.
+- Horizon only serves closed ledgers, which are final, so there is no reorg window
+  and no `confirmations` setting.
+- The first run starts at each account's newest transaction and records nothing
+  from before. There is no way to replay older history yet.
+- The Horizon `paging_token` of the newest recorded transaction per account is
+  kept in `stellar.cursor` next to `config.toml`: the first line is a fingerprint of
+  the network passphrase and the account list, then one `<account> <token>` line
+  per account. An account with no line (it had no transactions at the first run, or
+  Horizon does not know it yet) is read from its oldest transaction. A file that
+  does not parse stops the watcher with an error instead of guessing.
+- If you change the accounts, or point `horizon_url` at another network, the watcher
+  stops with an error instead of continuing from a token that no longer fits.
+  Delete `stellar.cursor` to start again from the current tip.
+- Per poll and account, at most `max_records` transactions are recorded, oldest
+  first, and the next poll continues. Only that many are read. With several
+  accounts a poll stops at the ledger where the most backlogged account stops, so a
+  transaction on two accounts is recorded once. Only one ledger holding more than
+  `max_records` transactions for an account can still split one across polls.
+- A node that returns transactions out of order is an error and nothing is
+  recorded.
+- A mistyped account id that is still a valid id looks like an account with no
+  transactions: Horizon answers 404 and the watcher records nothing for it.
+- Horizon keeps limited history on some servers; a cursor older than that reads from
+  the oldest transaction the server still has, without a warning.
+- Delivery is best effort, with the same limits as the other adapters: the watcher
+  stops with an error and keeps its cursor when the daemon cannot be reached, a
+  record the daemon drops after the datagram is sent is not re-sent, and a crash
+  between sending and saving the cursor can send events again. A settings or
+  cursor-file error stops the watcher; network errors are retried.
+- The server must serve `/` (for the network passphrase) and
+  `/accounts/<id>/transactions`. Public Horizon servers rate-limit requests.
+- The Horizon URL is never printed in errors, because it may contain an API key. It
+  is stored in plain text in `config.toml`.
+
+### Node replies
+
+All three adapters refuse a reply body over 16 MiB, and show a node's own error text
+without control characters and cut at 200 characters.
 
 ## Environment variables
 

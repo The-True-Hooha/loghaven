@@ -122,6 +122,11 @@ pub fn validate_ethereum(eth: &super::EthereumConfig) -> Result<()> {
     if !(eth.rpc_url.starts_with("http://") || eth.rpc_url.starts_with("https://")) {
         return bad("rpc_url must start with http:// or https://".into());
     }
+    if let Some(ws) = &eth.ws_url
+        && !(ws.starts_with("ws://") || ws.starts_with("wss://"))
+    {
+        return bad("ws_url must start with ws:// or wss://".into());
+    }
     crate::storage::validate_app_name(&eth.app)?;
     if eth.addresses.is_empty() {
         return bad("addresses must list at least one contract address".into());

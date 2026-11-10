@@ -6,3 +6,4 @@ pub mod rpc;
 pub mod solana;
 pub mod stellar;
 pub mod watch;
+pub mod ws;
