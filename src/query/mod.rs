@@ -1,3 +1,4 @@
+mod dashboard;
 mod handlers;
 
 use crate::auth::session::SessionStore;
@@ -15,6 +16,14 @@ pub struct QueryState {
     pub require_auth: bool,
     /// Bounds concurrent scans; each holds a blocking thread and reads whole chunks.
     pub query_slots: Arc<tokio::sync::Semaphore>,
+}
+
+fn router(state: QueryState) -> Router {
+    Router::new()
+        .merge(handlers::routes())
+        .merge(dashboard::routes())
+        .layer(axum::middleware::from_fn(dashboard::local_host_only))
+        .with_state(state)
 }
 
 pub const MAX_CONCURRENT_QUERIES: usize = 4;
@@ -51,11 +60,7 @@ impl QueryServer {
 
         println!("Query server listening on http://{}", addr);
 
-        let app = Router::new()
-            .merge(handlers::routes())
-            .with_state(self.state.clone());
-
-        axum::serve(listener, app)
+        axum::serve(listener, router(self.state.clone()))
             .await
             .map_err(|e| LogHavenError::Daemon(format!("query server error: {}", e)))?;
 

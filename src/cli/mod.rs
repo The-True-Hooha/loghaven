@@ -171,6 +171,29 @@ pub enum Commands {
         profile: Option<String>,
     },
 
+    #[command(about = "Open the web dashboard for one app in your browser")]
+    Dashboard {
+        #[arg(long, value_name = "APP", help = "App to show")]
+        app: String,
+
+        #[arg(
+            long,
+            value_name = "SECS",
+            default_value_t = 8 * 3600,
+            help = "How long the dashboard session lasts"
+        )]
+        ttl_secs: u64,
+
+        #[arg(
+            long,
+            help = "Print the URL instead of opening a browser; the URL contains the session token"
+        )]
+        no_open: bool,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+
     #[command(about = "Show the records that carry one transaction hash, oldest first")]
     Trace {
         #[arg(value_name = "TX_HASH")]
@@ -332,6 +355,12 @@ pub fn execute(cli: Cli) -> crate::error::Result<()> {
         Some(Commands::Watch {
             chain: WatchCommands::Stellar { once, profile },
         }) => commands::watch_stellar(once, profile.as_deref()),
+        Some(Commands::Dashboard {
+            app,
+            ttl_secs,
+            no_open,
+            profile,
+        }) => commands::dashboard(app, ttl_secs, no_open, profile.as_deref()),
         Some(Commands::Tui {
             apps,
             token,
