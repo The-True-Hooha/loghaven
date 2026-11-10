@@ -20,6 +20,7 @@ struct Mock {
     failed: BTreeSet<u64>,
     passphrase: String,
     max_page: usize,
+    latest_ledger: u64,
     unordered: bool,
     calls: RefCell<Vec<String>>,
 }
@@ -32,6 +33,7 @@ impl Mock {
             failed: BTreeSet::new(),
             passphrase: PASSPHRASE.into(),
             max_page: usize::MAX,
+            latest_ledger: u64::MAX,
             unordered: false,
             calls: RefCell::new(vec![]),
         }
@@ -84,7 +86,10 @@ impl Get for Mock {
     async fn get(&self, path: &str) -> Result<Option<Value>> {
         self.calls.borrow_mut().push(path.into());
         if path == "/" {
-            return Ok(Some(json!({"network_passphrase": self.passphrase})));
+            return Ok(Some(json!({
+                "network_passphrase": self.passphrase,
+                "history_latest_ledger": self.latest_ledger,
+            })));
         }
         let account = path
             .strip_prefix("/accounts/")
@@ -434,4 +439,78 @@ fn validation_rejects_bad_settings() {
     assert!(c(&|s| s.max_records = 0));
     assert!(c(&|s| s.max_records = 1_001));
     assert!(c(&|s| s.app = "../x".into()));
+}
+
+#[test]
+fn transactions_in_a_ledger_not_yet_closed_for_every_account_are_left_for_the_next_poll() {
+    // ledger of tx n is 100 + n; ledger 106 closed after the poll began reading
+    let mut rpc = Mock::new().with(A, 1..=6).with(B, 6..=6);
+    rpc.latest_ledger = 105;
+    let c = StellarConfig {
+        accounts: vec![A.into(), B.into()],
+        ..cfg()
+    };
+    let cur = Cursor {
+        binding: "b".into(),
+        last: BTreeMap::from([(A.into(), token(4)), (B.into(), token(0))]),
+    };
+    let b = block_on(poll(&rpc, &c, Some(&cur))).unwrap();
+    assert_eq!(
+        hashes(&b),
+        [hash(5)],
+        "tx 6 is in ledger 106, above the ceiling"
+    );
+    assert_eq!(b.last[A], token(5));
+    assert_eq!(b.last[&B.to_string()], token(0));
+    rpc.latest_ledger = 106;
+    let b = block_on(poll(&rpc, &c, Some(&cursor_from(b)))).unwrap();
+    assert_eq!(
+        hashes(&b),
+        [hash(6)],
+        "recorded once, through both accounts"
+    );
+}
+
+#[test]
+fn a_ledger_that_fills_one_accounts_page_does_not_split_a_shared_transaction() {
+    let mut rpc = Mock::new().with(A, 1..=5).with(B, 5..=5);
+    for n in 1..=5 {
+        rpc.ledger_of.insert(n, 200);
+    }
+    let c = StellarConfig {
+        accounts: vec![A.into(), B.into()],
+        max_records: 3,
+        ..cfg()
+    };
+    let mut cur = Cursor {
+        binding: "b".into(),
+        last: BTreeMap::from([(A.into(), token(0)), (B.into(), token(4))]),
+    };
+    let mut all = vec![];
+    for _ in 0..10 {
+        let b = block_on(poll(&rpc, &c, Some(&cur))).unwrap();
+        all.extend(hashes(&b));
+        let more = b.more;
+        cur = cursor_from(b);
+        if !more {
+            break;
+        }
+    }
+    assert_eq!(all, (1..=5).map(hash).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_root_document_without_the_latest_ledger_is_an_error() {
+    struct NoLedger;
+    impl Get for NoLedger {
+        async fn get(&self, _: &str) -> Result<Option<Value>> {
+            Ok(Some(json!({"network_passphrase": "x"})))
+        }
+    }
+    let e = block_on(poll(&NoLedger, &cfg(), Some(&cursor_at(A, 1))))
+        .err()
+        .unwrap();
+    assert!(
+        matches!(e, LogHavenError::Daemon(_)) && e.to_string().contains("history_latest_ledger")
+    );
 }

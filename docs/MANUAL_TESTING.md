@@ -92,7 +92,7 @@ max_block_range = 100
 | `echo 99999999 > ethereum.cursor` | error: far ahead of the chain head |
 | change `addresses`, then run again | error: cursor was saved for another chain or other addresses/topics |
 | `echo 137 > /tmp/lh-state/chainid`, run again | the same error |
-| stop the daemon | error reaching the query server; cursor unchanged |
+| stop the daemon | error reaching the query server, cursor unchanged (`--once` exits; without it the watcher retries) |
 | `cat /tmp/lh-state/lastfilter.json` | the address list and, with `topics` set, `"topics": [[...]]` |
 | `loghaven trace 0x…03de --app ethereum` | the event for block 990 (`%064x` of 990) |
 
@@ -128,7 +128,7 @@ followed by the number, digits written as `a`..`j` (transaction 105 is `S…Sbaf
 | `echo 1 > /tmp/lh-sol-state/big` | recorded, `logs_truncated: true` |
 | `echo AAAA… > /tmp/lh-sol-state/genesis` | error: cursor was saved for another cluster; exit code 1 |
 | stop the mock node | error without the RPC URL |
-| stop the daemon | error reaching the query server; cursor unchanged |
+| stop the daemon | error reaching the query server, cursor unchanged (`--once` exits; without it the watcher retries) |
 
 ### `ws_url` against anvil
 
@@ -177,5 +177,5 @@ Transaction `n` has hash `%064x` of `n`; every 7th failed.
 | `echo 1 > /tmp/lh-xlm-state/bigmemo` | recorded, memo cut at 128 characters |
 | `echo 503 > /tmp/lh-xlm-state/status` | error `HTTP 503 Service Unavailable`; cursor unchanged |
 | `echo Public > /tmp/lh-xlm-state/passphrase` | error: cursor was saved for another network; exit code 1 |
-| stop the daemon | error reaching the query server; cursor unchanged |
+| stop the daemon | error reaching the query server, cursor unchanged (`--once` exits; without it the watcher retries) |
 

@@ -22,6 +22,7 @@ struct Mock {
     genesis: String,
     fail_tx: bool,
     max_page: usize,
+    finalized: u64,
     recent: bool,
     calls: RefCell<Vec<(String, Value)>>,
 }
@@ -34,6 +35,7 @@ impl Mock {
             genesis: GENESIS.into(),
             fail_tx: false,
             max_page: usize::MAX,
+            finalized: u64::MAX,
             recent: false,
             calls: RefCell::new(vec![]),
         }
@@ -90,6 +92,7 @@ impl Rpc for Mock {
             .push((method.into(), params.clone()));
         match method {
             "getGenesisHash" => Ok(json!(self.genesis)),
+            "getSlot" => Ok(json!(self.finalized)),
             "getSignaturesForAddress" => {
                 let addr = params[0].as_str().unwrap();
                 let opts = &params[1];
@@ -698,4 +701,29 @@ fn a_transaction_on_two_addresses_is_recorded_once_even_when_one_is_capped() {
     sorted.dedup();
     assert_eq!(all.len(), 5, "{all:?}");
     assert_eq!(sorted, (1..=5).map(sig).collect::<Vec<_>>());
+}
+
+#[test]
+fn transactions_above_the_finalized_slot_read_first_are_left_for_the_next_poll() {
+    // slot of tx n is 1000 + n; tx 6 finalized after the slot was read
+    let mut rpc = Mock::new().with(ADDR, 1..=6).with(ADDR2, 6..=6);
+    rpc.finalized = 1005;
+    let c = SolanaConfig {
+        addresses: vec![ADDR.into(), ADDR2.into()],
+        ..cfg()
+    };
+    let cur = Cursor {
+        binding: "b".into(),
+        last: BTreeMap::from([(ADDR.into(), mark(4)), (ADDR2.into(), mark(0))]),
+    };
+    let b = block_on(poll(&rpc, &c, Some(&cur))).unwrap();
+    assert_eq!(hashes(&b), [sig(5)]);
+    assert!(
+        !b.more,
+        "waiting for the chain is not a backlog: no hot loop"
+    );
+    assert_eq!(b.last[ADDR2].signature, sig(0));
+    rpc.finalized = 1006;
+    let b = block_on(poll(&rpc, &c, Some(&cursor_from(b)))).unwrap();
+    assert_eq!(hashes(&b), [sig(6)]);
 }

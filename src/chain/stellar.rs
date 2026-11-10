@@ -73,11 +73,16 @@ fn parse_tx(v: &Value) -> Result<Tx> {
 
 /// Up to `want` transactions after `after`, oldest first. Horizon pages ascending from
 /// a cursor, so only the part that is going to be recorded is read.
+///
+/// Transactions in a ledger above `ceiling` are left out: accounts are read one after
+/// another, and a transaction that lands in between must not be seen through one
+/// account now and the other later.
 async fn page_after(
     get: &impl Get,
     account: &str,
     after: Option<u64>,
     want: usize,
+    ceiling: u64,
 ) -> Result<Vec<Tx>> {
     let mut out: Vec<Tx> = vec![];
     let mut cursor = after;
@@ -100,6 +105,9 @@ async fn page_after(
         }
         for v in records.iter().take(limit) {
             let tx = parse_tx(v)?;
+            if tx.ledger > ceiling {
+                return Ok(out);
+            }
             // a node that does not move forward would make this loop, or a cursor, go backwards
             if cursor.is_some_and(|c| tx.token <= c) {
                 return Err(LogHavenError::Daemon(
@@ -174,6 +182,14 @@ pub async fn poll(get: &impl Get, cfg: &StellarConfig, saved: Option<&Cursor>) -
         });
     };
 
+    let ceiling = get
+        .get("/")
+        .await?
+        .as_ref()
+        .and_then(|root| number(root.get("history_latest_ledger")))
+        .ok_or_else(|| {
+            LogHavenError::Daemon("horizon: root has no history_latest_ledger".into())
+        })?;
     // one more than `max`, to know whether the account has a backlog beyond this poll
     let mut listed = vec![];
     for account in accounts {
@@ -181,7 +197,7 @@ pub async fn poll(get: &impl Get, cfg: &StellarConfig, saved: Option<&Cursor>) -
         listed.push((
             account,
             until,
-            page_after(get, account, until, max + 1).await?,
+            page_after(get, account, until, max + 1, ceiling).await?,
         ));
     }
     let slices: Vec<&[Tx]> = listed.iter().map(|(_, _, p)| p.as_slice()).collect();

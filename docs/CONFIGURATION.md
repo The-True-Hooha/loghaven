@@ -153,8 +153,9 @@ How it behaves:
   Delete it to start again from `start_block`. A cursor file that is not a
   block number, or one far ahead of the chain head (wrong node or chain), stops
   the watcher with an error instead of guessing.
-- Delivery is best effort. With auth on, the watcher stops with an error and
-  keeps its cursor when the daemon cannot be reached. Once datagrams are sent
+- Delivery is best effort. With auth on, when the daemon cannot be reached the
+  watcher reports the error, keeps its cursor and retries (`--once` exits with the
+  error). Once datagrams are sent
   over UDP, a record the daemon drops (for example because it crashed right
   then) is not re-sent. A crash or error between sending and saving the cursor
   can send the same events again, so a trace may show an event twice.
@@ -175,10 +176,12 @@ How it behaves:
   watcher subscribes to `newHeads` and polls as soon as a block is announced,
   instead of waiting out `poll_interval_secs`. It never polls more than once a
   second. Reading, the cursor and `confirmations` are unchanged and still use
-  `rpc_url`, so a socket that drops, stays silent or is refused (the node
-  answers the subscription with an error) only costs latency: the watcher polls
-  on the interval and reconnects on the next wait. The URL is never printed in
-  errors. `wss://` uses the built-in root certificates; it has not been tried
+  `rpc_url`, so a socket that drops, stays silent or is refused only costs latency: the watcher polls
+  on the interval and reconnects on the next wait. A node that answers the
+  subscription with "method not found" is not asked again until the watcher
+  restarts; any other refusal (a rate limit) is retried. The socket is read only
+  while waiting, so a node that drops quiet clients can cause a reconnect each
+  cycle. Messages over 1 MiB are refused. The URL is never printed in errors. `wss://` uses the built-in root certificates; it has not been tried
   against a public node.
 - If your node rejects a range because it holds too many logs, lower
   `max_block_range`.
@@ -227,11 +230,13 @@ How it behaves:
 - If you change the addresses, or point `rpc_url` at another cluster, the watcher
   stops with an error instead of continuing from a signature that no longer
   fits. Delete `solana.cursor` to start again from the current tip.
-- A transaction that touches two watched addresses is recorded once. With
-  several addresses, a poll stops at the slot where the most backlogged address
-  stops, so such a transaction is taken by all of them together. Only a single
-  slot holding more than `max_signatures` transactions for one address can still
-  split one across polls.
+- A transaction that touches two watched addresses is recorded once. Each poll
+  reads the finalized slot first and takes nothing above it, so a transaction that
+  lands while the addresses are being read is taken by all of them in the next
+  poll. With a backlog, a poll also stops at the slot where the most backlogged
+  address stops. If one slot holds more than `max_signatures` transactions for an
+  address, that address takes its page of it and the other addresses wait until it
+  has finished the slot. The adapter makes one extra `getSlot` call per poll.
 - Per poll and address, at most `max_signatures` transactions are recorded,
   oldest first, and the next poll continues. If more than 10000 transactions
   are waiting (a long outage), the oldest ones are skipped and one record with
@@ -250,9 +255,9 @@ How it behaves:
 - During a catch-up the backlog is listed once and then worked through from
   memory, so new transactions on an address show up after the catch-up ends.
   A restart lists it again.
-- Delivery is best effort, with the same limits as the Ethereum adapter: the
-  watcher stops with an error and keeps its cursor when the daemon cannot be
-  reached, a record the daemon drops after the datagram is sent is not re-sent,
+- Delivery is best effort, with the same limits as the Ethereum adapter: when the
+  daemon cannot be reached the watcher reports the error, keeps its cursor and
+  retries (`--once` exits with it), a record the daemon drops after the datagram is sent is not re-sent,
   and a crash between sending and saving the cursor can send events again. A
   settings or cursor-file error stops the watcher; network errors are retried.
 - The node must support `getSignaturesForAddress`, `getTransaction` and
@@ -304,18 +309,22 @@ How it behaves:
   Delete `stellar.cursor` to start again from the current tip.
 - Per poll and account, at most `max_records` transactions are recorded, oldest
   first, and the next poll continues. Only that many are read. With several
-  accounts a poll stops at the ledger where the most backlogged account stops, so a
-  transaction on two accounts is recorded once. Only one ledger holding more than
-  `max_records` transactions for an account can still split one across polls.
+  accounts, a poll takes nothing above the latest closed ledger it read from `/`
+  (`history_latest_ledger`) first, so a transaction that lands while the accounts are
+  being read is taken by all of them in the next poll. With a backlog it also stops
+  at the ledger where the most backlogged account stops. If one ledger holds more
+  than `max_records` transactions for an account, that account takes its page of it
+  and the other accounts wait until it has finished the ledger. A transaction on two
+  accounts is therefore recorded once.
 - A node that returns transactions out of order is an error and nothing is
   recorded.
 - A mistyped account id that is still a valid id looks like an account with no
   transactions: Horizon answers 404 and the watcher records nothing for it.
 - Horizon keeps limited history on some servers; a cursor older than that reads from
   the oldest transaction the server still has, without a warning.
-- Delivery is best effort, with the same limits as the other adapters: the watcher
-  stops with an error and keeps its cursor when the daemon cannot be reached, a
-  record the daemon drops after the datagram is sent is not re-sent, and a crash
+- Delivery is best effort, with the same limits as the other adapters: when the
+  daemon cannot be reached the watcher reports the error, keeps its cursor and
+  retries (`--once` exits with it), a record the daemon drops after the datagram is sent is not re-sent, and a crash
   between sending and saving the cursor can send events again. A settings or
   cursor-file error stops the watcher; network errors are retried.
 - The server must serve `/` (for the network passphrase) and

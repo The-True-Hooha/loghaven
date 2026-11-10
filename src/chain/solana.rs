@@ -356,6 +356,14 @@ pub async fn poll_with(
         });
     };
 
+    // Addresses are read one after another, so a transaction that lands in between must
+    // not be seen through one now and through the other later: nothing above the
+    // finalized slot read here is taken in this poll.
+    let ceiling = rpc
+        .call("getSlot", json!([{"commitment": "finalized"}]))
+        .await?
+        .as_u64()
+        .ok_or_else(|| LogHavenError::Daemon("rpc getSlot: result is not a slot".into()))?;
     let mut records = vec![];
     let mut listed = vec![];
     for address in addresses {
@@ -364,7 +372,8 @@ pub async fn poll_with(
         if skipped {
             records.push(gap_record(address));
         }
-        listed.push((address, until, pending));
+        let within = pending.partition_point(|i| i.slot <= ceiling);
+        listed.push((address, until, pending[..within].to_vec()));
     }
     let slices: Vec<&[SigInfo]> = listed.iter().map(|(_, _, p)| p.as_slice()).collect();
     let counts = take_counts(&slices, max, |i| i.slot);

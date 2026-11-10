@@ -64,7 +64,10 @@ class H(BaseHTTPRequestHandler):
         if rd("status"):
             return self.reply(int(rd("status")), {"status": int(rd("status"))})
         if u.path == "/":
-            return self.reply(200, {"network_passphrase": rd("passphrase", "Test SDF Network ; September 2015")})
+            return self.reply(200, {
+                "network_passphrase": rd("passphrase", "Test SDF Network ; September 2015"),
+                "history_latest_ledger": 100 + int(rd("tip", "100")),
+            })
         if u.path != "/accounts/%s/transactions" % ACCOUNT:
             return self.reply(404, {"status": 404})
         ns = list(range(1, int(rd("tip", "100")) + 1))

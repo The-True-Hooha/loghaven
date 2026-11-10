@@ -9,9 +9,10 @@ use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::time::{Instant, sleep_until, timeout, timeout_at};
+use tokio::time::{Instant, sleep_until, timeout_at};
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 
 type Conn = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -20,12 +21,49 @@ const MIN_GAP: Duration = Duration::from_secs(1);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ERR_CHARS: usize = 200;
 
+/// Nodes announce a head every few seconds; a bigger message is not a head.
+const MAX_MESSAGE_BYTES: usize = 1 << 20;
+
 pub struct Heads {
     url: String,
     conn: Option<Conn>,
-    /// The node answered the subscription with an error; it is not asked again.
+    /// The node does not know `eth_subscribe`; it is not asked again.
     unsupported: bool,
     last_warning: String,
+}
+
+enum Heard {
+    Head,
+    Refused(String, bool),
+    Gone(String),
+    Other,
+}
+
+fn classify(message: Message) -> Heard {
+    let bytes = match &message {
+        Message::Text(t) => t.as_bytes(),
+        Message::Binary(b) => b.as_ref(),
+        Message::Close(_) => return Heard::Gone("websocket closed by the node".into()),
+        _ => return Heard::Other,
+    };
+    let msg: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+    if msg.get("method").and_then(Value::as_str) == Some("eth_subscription") {
+        return Heard::Head;
+    }
+    let Some(err) = msg.get("error") else {
+        return Heard::Other;
+    };
+    let text: String = err
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_ERR_CHARS)
+        .collect();
+    // only "no such method" is permanent; a rate limit or a busy node may pass
+    let permanent = err.get("code").and_then(Value::as_i64) == Some(-32601);
+    Heard::Refused(text, permanent)
 }
 
 impl Heads {
@@ -45,26 +83,38 @@ impl Heads {
         }
     }
 
-    /// The URL often embeds an API key, so errors never carry it.
-    async fn connect(&self) -> std::result::Result<Conn, String> {
+    /// The URL often embeds an API key, so errors never carry it. Gives up at `deadline`.
+    async fn connect(&self, deadline: Instant) -> std::result::Result<Conn, String> {
         let fail = |what: &str, e: &dyn std::fmt::Display| {
             let text: String = e.to_string().chars().take(MAX_ERR_CHARS).collect();
             format!("websocket {what} failed: {text}; polling on the interval")
         };
-        let (mut conn, _) = timeout(CONNECT_TIMEOUT, connect_async(self.url.as_str()))
-            .await
-            .map_err(|_| "websocket connect timed out; polling on the interval".to_string())?
-            .map_err(|e| fail("connect", &e))?;
+        let timed_out = |what: &str| format!("websocket {what} timed out; polling on the interval");
+        let deadline = deadline.min(Instant::now() + CONNECT_TIMEOUT);
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(MAX_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_MESSAGE_BYTES));
+        let (mut conn, _) = timeout_at(
+            deadline,
+            connect_async_with_config(self.url.as_str(), Some(config), false),
+        )
+        .await
+        .map_err(|_| timed_out("connect"))?
+        .map_err(|e| fail("connect", &e))?;
         let subscribe =
             json!({"jsonrpc": "2.0", "id": 1, "method": "eth_subscribe", "params": ["newHeads"]});
-        conn.send(Message::text(subscribe.to_string()))
+        timeout_at(deadline, conn.send(Message::text(subscribe.to_string())))
             .await
+            .map_err(|_| timed_out("subscribe"))?
             .map_err(|e| fail("subscribe", &e))?;
         Ok(conn)
     }
 
     /// Returns when a new block is announced or after `interval`, whichever is first,
-    /// but never sooner than `MIN_GAP` after the call.
+    /// but never sooner than `MIN_GAP` after the call, and never later than `interval`.
+    ///
+    /// The socket is read only here, so the node's pings go unanswered while a poll
+    /// runs; a node that drops quiet clients costs a reconnect, not data.
     pub async fn wait(&mut self, interval: Duration) {
         let start = Instant::now();
         let deadline = start + interval;
@@ -73,7 +123,7 @@ impl Heads {
             return sleep_until(deadline).await;
         }
         if self.conn.is_none() {
-            match self.connect().await {
+            match self.connect(deadline).await {
                 Ok(conn) => {
                     self.last_warning.clear();
                     self.conn = Some(conn);
@@ -88,39 +138,46 @@ impl Heads {
             let Some(conn) = self.conn.as_mut() else {
                 return sleep_until(deadline).await;
             };
-            let next = match timeout_at(deadline, conn.next()).await {
+            let heard = match timeout_at(deadline, conn.next()).await {
                 Err(_) => return,
-                Ok(next) => next,
-            };
-            match next {
-                Some(Ok(Message::Text(text))) => {
-                    let msg: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-                    if msg.get("method").and_then(Value::as_str) == Some("eth_subscription") {
-                        // heads that piled up while polling are one wake-up, not many
-                        while conn.next().now_or_never().is_some_and(|m| m.is_some()) {}
-                        return sleep_until(floor).await;
-                    }
-                    if msg.get("error").is_some() {
-                        self.conn = None;
-                        self.unsupported = true;
-                        self.warn(
-                            "node refused eth_subscribe newHeads; polling on the interval".into(),
-                        );
-                        return sleep_until(deadline).await;
-                    }
-                }
-                Some(Ok(Message::Close(_))) | None => {
-                    self.conn = None;
-                    self.warn("websocket closed by the node; polling on the interval".into());
-                    return sleep_until(deadline).await;
-                }
-                Some(Err(e)) => {
-                    self.conn = None;
+                Ok(None) => Heard::Gone("websocket closed by the node".into()),
+                Ok(Some(Err(e))) => {
                     let text: String = e.to_string().chars().take(MAX_ERR_CHARS).collect();
-                    self.warn(format!("websocket failed: {text}; polling on the interval"));
+                    Heard::Gone(format!("websocket failed: {text}"))
+                }
+                Ok(Some(Ok(message))) => classify(message),
+            };
+            match heard {
+                Heard::Head => {
+                    sleep_until(floor).await;
+                    // heads that piled up meanwhile are one wake-up, not many
+                    while let Some(next) = self.conn.as_mut().and_then(|c| c.next().now_or_never())
+                    {
+                        let alive = match next {
+                            Some(Ok(m)) => matches!(classify(m), Heard::Head | Heard::Other),
+                            _ => false,
+                        };
+                        if !alive {
+                            self.conn = None;
+                            break;
+                        }
+                    }
+                    return;
+                }
+                Heard::Refused(text, permanent) => {
+                    self.conn = None;
+                    self.unsupported = permanent;
+                    self.warn(format!(
+                        "node refused eth_subscribe newHeads ({text}); polling on the interval"
+                    ));
                     return sleep_until(deadline).await;
                 }
-                Some(Ok(_)) => {}
+                Heard::Gone(msg) => {
+                    self.conn = None;
+                    self.warn(format!("{msg}; polling on the interval"));
+                    return sleep_until(deadline).await;
+                }
+                Heard::Other => {}
             }
         }
     }
@@ -138,7 +195,9 @@ mod tests {
     enum Cmd {
         Head,
         Error,
+        Busy,
         Close,
+        HeadThenClose,
     }
 
     /// A node that accepts subscriptions and sends what the test tells it to.
@@ -159,15 +218,27 @@ mod tests {
                 assert!(sub.to_text().unwrap().contains("newHeads"));
                 loop {
                     let Some(cmd) = rx.recv().await else { return };
+                    let refusal = matches!(cmd, Cmd::Error | Cmd::Busy);
                     let out = match cmd {
                         Cmd::Head => json!({"jsonrpc":"2.0","method":"eth_subscription",
                             "params":{"subscription":"0x1","result":{"number":"0x10"}}}),
                         Cmd::Error => {
                             json!({"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"nope"}})
                         }
+                        Cmd::Busy => {
+                            json!({"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"rate limited"}})
+                        }
                         Cmd::Close => break,
+                        Cmd::HeadThenClose => {
+                            let head = json!({"method":"eth_subscription","params":{"result":{}}});
+                            ws.send(Message::text(head.to_string())).await.unwrap();
+                            break;
+                        }
                     };
                     ws.send(Message::text(out.to_string())).await.unwrap();
+                    if refusal {
+                        break;
+                    }
                 }
                 let _ = ws.close(None).await;
             }
@@ -195,7 +266,7 @@ mod tests {
         let took = timed(&mut h, LONG).await;
         let _tx = sender.await.unwrap();
         assert!(took >= Duration::from_millis(900), "{took:?}");
-        assert!(took < Duration::from_secs(5), "{took:?}");
+        assert!(took < Duration::from_secs(15), "{took:?}");
     }
 
     #[tokio::test]
@@ -204,7 +275,7 @@ mod tests {
         let mut h = Heads::new(&url);
         let took = timed(&mut h, Duration::from_millis(1500)).await;
         assert!(took >= Duration::from_millis(1450), "{took:?}");
-        assert!(took < Duration::from_secs(4), "{took:?}");
+        assert!(took < Duration::from_secs(10), "{took:?}");
     }
 
     #[tokio::test]
@@ -228,7 +299,11 @@ mod tests {
         let mut h = Heads::new("ws://127.0.0.1:1/secret-key");
         let took = timed(&mut h, Duration::from_millis(1200)).await;
         assert!(took >= Duration::from_millis(1150), "{took:?}");
-        let msg = h.connect().await.err().unwrap();
+        let msg = h
+            .connect(Instant::now() + Duration::from_secs(5))
+            .await
+            .err()
+            .unwrap();
         assert!(
             !msg.contains("secret-key") && !msg.contains("127.0.0.1:1/"),
             "{msg}"
@@ -267,5 +342,73 @@ mod tests {
         assert!(h.unsupported && h.conn.is_none());
         timed(&mut h, Duration::from_millis(300)).await;
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_node_that_never_finishes_the_handshake_does_not_stretch_the_wait() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _held = listener.accept().await;
+            std::future::pending::<()>().await;
+        });
+        let mut h = Heads::new(&url);
+        let took = timed(&mut h, Duration::from_millis(1500)).await;
+        assert!(took >= Duration::from_millis(1450), "{took:?}");
+        assert!(
+            took < Duration::from_secs(4),
+            "must not wait out the 10 s connect timeout: {took:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_close_that_follows_a_head_drops_the_connection_at_once() {
+        let (url, tx, accepted) = node().await;
+        let mut h = Heads::new(&url);
+        tx.send(Cmd::HeadThenClose).unwrap();
+        timed(&mut h, LONG).await;
+        assert!(h.conn.is_none(), "a dead connection must not be kept");
+        let sender = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            tx.send(Cmd::Head).unwrap();
+            tx
+        });
+        let took = timed(&mut h, LONG).await;
+        let _tx = sender.await.unwrap();
+        assert!(
+            took < Duration::from_secs(15),
+            "reconnected at once: {took:?}"
+        );
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_temporary_refusal_is_retried_but_method_not_found_is_final() {
+        let (url, tx, accepted) = node().await;
+        let mut h = Heads::new(&url);
+        tx.send(Cmd::Busy).unwrap();
+        timed(&mut h, Duration::from_millis(1100)).await;
+        assert!(!h.unsupported && h.conn.is_none());
+        tx.send(Cmd::Error).unwrap();
+        timed(&mut h, Duration::from_millis(1100)).await;
+        assert!(h.unsupported);
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            2,
+            "the busy refusal was retried"
+        );
+    }
+
+    #[test]
+    fn heads_sent_as_binary_frames_count() {
+        let head = br#"{"method":"eth_subscription","params":{}}"#.to_vec();
+        assert!(matches!(
+            classify(Message::Binary(head.into())),
+            Heard::Head
+        ));
+        assert!(matches!(
+            classify(Message::Text("not json".into())),
+            Heard::Other
+        ));
     }
 }

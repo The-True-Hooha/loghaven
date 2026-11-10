@@ -49,6 +49,8 @@ class H(BaseHTTPRequestHandler):
         tip = int(rd("tip", "100"))
         if m == "getGenesisHash":
             res = rd("genesis", "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d")
+        elif m == "getSlot":
+            res = 1000 + tip
         elif m == "getSignaturesForAddress":
             o = p[1]
             ns = list(range(tip, 0, -1)) if p[0] == ADDR else []

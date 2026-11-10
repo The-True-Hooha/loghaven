@@ -18,27 +18,37 @@ pub struct Step {
 }
 
 /// How many entries of each backlog to take, for chains that list per address. At
-/// most `max` each, and never past the slot (or ledger) where the busiest capped address stops, so a transaction that touches
-/// several addresses is taken together in one poll. A slot split by the cap is left
-/// for the next poll, unless it is the only slot there is.
+/// most `max` each, and never past the slot (or ledger) where the busiest capped
+/// address stops, so a transaction that touches several addresses is taken together
+/// in one poll. A slot split by the cap is left for the next poll. When the cap falls
+/// inside one slot that fills the whole page, that address takes its page and the
+/// others wait until it has finished the slot.
 pub fn take_counts<T>(pendings: &[&[T]], max: usize, slot: impl Fn(&T) -> u64) -> Vec<usize> {
     if pendings.len() < 2 {
         return pendings.iter().map(|p| p.len().min(max)).collect();
     }
-    let mut horizon: Option<u64> = None;
-    for p in pendings.iter().filter(|p| p.len() > max) {
-        let last = slot(&p[max - 1]);
-        let own = p[..max]
-            .iter()
-            .rposition(|i| slot(i) != last)
-            .map_or(last, |k| slot(&p[k]));
-        horizon = Some(horizon.map_or(own, |h| h.min(own)));
-    }
+    // per capped address: where it stops, and whether its whole page is one slot
+    let stops: Vec<Option<(u64, bool)>> = pendings
+        .iter()
+        .map(|p| {
+            if p.len() <= max {
+                return None;
+            }
+            let last = slot(&p[max - 1]);
+            Some(match p[..max].iter().rposition(|i| slot(i) != last) {
+                Some(k) => (slot(&p[k]), false),
+                None => (last.saturating_sub(1), true),
+            })
+        })
+        .collect();
+    let horizon = stops.iter().flatten().map(|(h, _)| *h).min();
     pendings
         .iter()
-        .map(|p| match horizon {
-            Some(h) => p.partition_point(|i| slot(i) <= h).min(max),
-            None => p.len(),
+        .zip(&stops)
+        .map(|(p, stop)| match (horizon, stop) {
+            (None, _) => p.len(),
+            (Some(h), Some((own, true))) if *own == h => max,
+            (Some(h), _) => p.partition_point(|i| slot(i) <= h).min(max),
         })
         .collect()
 }
@@ -176,8 +186,21 @@ mod tests {
         assert_eq!(take_counts(&[&a[..], &[5, 6]], 3, slot), [2, 0]);
         assert_eq!(take_counts(&[&a[..], &[1]], 3, slot), [2, 1]);
         assert_eq!(take_counts(&[&[1u64][..]], 3, slot), [1]);
-        // one slot holding more than the cap is taken up to the cap rather than stalling
         assert_eq!(take_counts(&[&[7u64; 5][..]], 3, slot), [3]);
         assert_eq!(take_counts(&[&[][..], &[1u64]], 3, slot), [0, 1]);
+    }
+
+    #[test]
+    fn a_slot_that_fills_a_whole_page_is_finished_before_other_addresses_take_it() {
+        let slot = |s: &u64| *s;
+        // A's page is all slot 7: A takes its page, B (which has slot 7 too) waits
+        assert_eq!(take_counts(&[&[7u64; 5][..], &[7, 8]], 3, slot), [3, 0]);
+        // B has older entries: those go now, slot 7 waits
+        assert_eq!(take_counts(&[&[7u64; 5][..], &[5, 6, 7]], 3, slot), [3, 2]);
+        // two full pages in different slots: the lower one goes, the other waits
+        assert_eq!(
+            take_counts(&[&[9u64; 5][..], &[7u64; 5][..]], 3, slot),
+            [0, 3]
+        );
     }
 }
