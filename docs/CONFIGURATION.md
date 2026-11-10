@@ -218,22 +218,29 @@ How it behaves:
 - If you change the addresses, or point `rpc_url` at another cluster, the watcher
   stops with an error instead of continuing from a signature that no longer
   fits. Delete `solana.cursor` to start again from the current tip.
-- A transaction that touches two watched addresses is recorded once per poll.
-  If the two addresses are read in different polls it can be recorded twice.
+- A transaction that touches two watched addresses is recorded once. With
+  several addresses, a poll stops at the slot where the most backlogged address
+  stops, so such a transaction is taken by all of them together. Only a single
+  slot holding more than `max_signatures` transactions for one address can still
+  split one across polls.
 - Per poll and address, at most `max_signatures` transactions are recorded,
   oldest first, and the next poll continues. If more than 10000 transactions
   are waiting (a long outage), the oldest ones are skipped and one record with
   level `warn` and no `tx_hash` says so.
 - Each program log line is cut at 512 characters and the logs of one
   transaction at about 4 KB; `metadata.log_count` has the real count and
-  `metadata.logs_truncated` is set. If the node no longer has a transaction
-  (pruned history, or a node that is behind), it is still recorded with
-  `metadata.logs_available = false`, and those logs are not fetched later.
-- If the node returns an error for one transaction every time, the watcher
-  retries it forever and records nothing after it; fix the node or delete
-  `solana.cursor`. While more than `max_signatures` are waiting, each poll lists
-  the whole backlog again (up to 10000 signatures), so a long catch-up makes many
-  calls to the node.
+  `metadata.logs_truncated` is set.
+- If `getTransaction` fails, or returns nothing for a transaction under ten
+  minutes old (a node that is behind), the poll fails and is retried on the
+  next interval. After 5 tries the transaction is recorded with
+  `metadata.logs_available = false` and `metadata.logs_error` (the error, or
+  empty for a missing one), and the watcher moves on; those logs are not
+  fetched later. A transaction older than ten minutes that the node no longer
+  has (pruned history) is recorded without logs at once. The tries are counted
+  in memory, so a restart starts counting again.
+- During a catch-up the backlog is listed once and then worked through from
+  memory, so new transactions on an address show up after the catch-up ends.
+  A restart lists it again.
 - Delivery is best effort, with the same limits as the Ethereum adapter: the
   watcher stops with an error and keeps its cursor when the daemon cannot be
   reached, a record the daemon drops after the datagram is sent is not re-sent,

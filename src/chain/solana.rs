@@ -26,6 +26,11 @@ const MAX_LOG_LINE: usize = 512;
 /// JSON-escaped bytes of program logs kept in a record, so one transaction cannot oversize a datagram.
 const MAX_LOG_BYTES: usize = 4096;
 const MAX_ERR_CHARS: usize = 200;
+/// Reads of one transaction tried (one per poll) before it is recorded without logs.
+const MAX_TX_ATTEMPTS: u32 = 5;
+/// A transaction this young that the node reports as unknown is probably not loaded
+/// there yet; an older one is pruned history.
+const RECENT_SECS: i64 = 600;
 
 /// A recorded transaction the cursor points at. The slot lets a node that does not
 /// know the signature (lagging, or pruned past it) be told from a real backlog.
@@ -35,6 +40,7 @@ pub struct Mark {
     pub slot: u64,
 }
 
+#[derive(Clone)]
 struct SigInfo {
     signature: String,
     slot: u64,
@@ -144,6 +150,125 @@ async fn transaction(rpc: &impl Rpc, signature: &str) -> Result<Option<Value>> {
     Ok((!tx.is_null()).then_some(tx))
 }
 
+/// What a watcher remembers between polls. All of it is a cache or a retry counter:
+/// losing it (a restart) costs calls, never correctness.
+#[derive(Default)]
+pub struct Memory {
+    queues: BTreeMap<String, Queue>,
+    failures: BTreeMap<String, u32>,
+}
+
+/// An address's listed backlog, oldest first, so a catch-up lists it once instead of every poll.
+struct Queue {
+    /// Signature the listing was taken after.
+    base: Option<String>,
+    skipped: bool,
+    pending: Vec<SigInfo>,
+}
+
+/// The backlog after `until`, from the cached listing when the cursor still sits inside it.
+/// The flag reports a skipped part, once: until something from the listing was sent.
+async fn pending_for(
+    rpc: &impl Rpc,
+    address: &str,
+    until: Option<&Mark>,
+    mem: &mut Memory,
+) -> Result<(Vec<SigInfo>, bool)> {
+    let until_sig = until.map(|m| m.signature.as_str());
+    if let Some(q) = mem.queues.get(address) {
+        let offset = if q.base.as_deref() == until_sig {
+            Some(0)
+        } else {
+            until_sig.and_then(|u| {
+                q.pending
+                    .iter()
+                    .position(|i| i.signature == u)
+                    .map(|i| i + 1)
+            })
+        };
+        if let Some(o) = offset.filter(|o| *o < q.pending.len()) {
+            return Ok((q.pending[o..].to_vec(), q.skipped && o == 0));
+        }
+    }
+    let (pending, skipped) = backlog(rpc, address, until).await?;
+    mem.queues.insert(
+        address.to_string(),
+        Queue {
+            base: until_sig.map(str::to_string),
+            skipped,
+            pending: pending.clone(),
+        },
+    );
+    Ok((pending, skipped))
+}
+
+fn is_recent(block_time: Option<i64>) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    block_time.is_some_and(|t| now - t < RECENT_SECS)
+}
+
+/// The transaction and, when it was given up on, why it has no logs. A failed or
+/// not-yet-known read is an error for the first attempts so the poll is retried.
+async fn fetch(
+    rpc: &impl Rpc,
+    info: &SigInfo,
+    mem: &mut Memory,
+) -> Result<(Option<Value>, Option<String>)> {
+    let failure = match transaction(rpc, &info.signature).await {
+        Ok(Some(tx)) => {
+            mem.failures.remove(&info.signature);
+            return Ok((Some(tx), None));
+        }
+        Ok(None) if !is_recent(info.block_time) => return Ok((None, None)),
+        Ok(None) => LogHavenError::Daemon(format!(
+            "rpc does not have transaction {} yet; retrying",
+            info.signature
+        )),
+        Err(e) => e,
+    };
+    if mem.failures.len() > MAX_BACKLOG {
+        mem.failures.clear();
+    }
+    let attempts = mem.failures.entry(info.signature.clone()).or_default();
+    *attempts += 1;
+    if *attempts < MAX_TX_ATTEMPTS {
+        return Err(failure);
+    }
+    // the entry stays, so a poll that fails on a later transaction gives up on this one at once
+    Ok((
+        None,
+        Some(failure.to_string().chars().take(MAX_ERR_CHARS).collect()),
+    ))
+}
+
+/// How many entries of each backlog to take. At most `max` each, and never past
+/// the slot where the busiest capped address stops, so a transaction that touches
+/// several addresses is taken together in one poll. A slot split by the cap is left
+/// for the next poll, unless it is the only slot there is.
+fn take_counts(pendings: &[&[SigInfo]], max: usize) -> Vec<usize> {
+    if pendings.len() < 2 {
+        return pendings.iter().map(|p| p.len().min(max)).collect();
+    }
+    let mut horizon: Option<u64> = None;
+    for p in pendings.iter().filter(|p| p.len() > max) {
+        let last = p[max - 1].slot;
+        let own = p[..max]
+            .iter()
+            .rposition(|i| i.slot != last)
+            .map_or(last, |k| p[k].slot);
+        horizon = Some(horizon.map_or(own, |h| h.min(own)));
+    }
+    pendings
+        .iter()
+        .map(|p| match horizon {
+            Some(h) => p.partition_point(|i| i.slot <= h).min(max),
+            None => p.len(),
+        })
+        .collect()
+}
+
 /// Program logs cut to line and total budgets; the flag says whether anything was dropped.
 fn bounded_logs(meta: &Value) -> (Vec<String>, usize, bool) {
     let lines: Vec<&str> = meta
@@ -168,7 +293,12 @@ fn bounded_logs(meta: &Value) -> (Vec<String>, usize, bool) {
     (kept, lines.len(), truncated)
 }
 
-fn to_record(address: &str, info: &SigInfo, tx: Option<&Value>) -> ClientRecord {
+fn to_record(
+    address: &str,
+    info: &SigInfo,
+    tx: Option<&Value>,
+    logs_error: Option<&str>,
+) -> ClientRecord {
     let meta = tx.and_then(|t| t.get("meta")).filter(|m| !m.is_null());
     let (logs, log_count, logs_truncated) = meta.map_or((vec![], 0, false), bounded_logs);
     let outcome = if info.err.is_some() { "failed" } else { "ok" };
@@ -188,6 +318,7 @@ fn to_record(address: &str, info: &SigInfo, tx: Option<&Value>) -> ClientRecord 
                 .and_then(|m| m.get("computeUnitsConsumed"))
                 .and_then(Value::as_u64),
             "logs_available": meta.is_some(),
+            "logs_error": logs_error,
             "logs": logs,
             "log_count": log_count,
             "logs_truncated": logs_truncated,
@@ -217,17 +348,23 @@ pub struct Batch {
     pub more: bool,
 }
 
-/// Reads the next transactions after `saved`. Stateless: the caller owns the cursor.
+/// Reads the next transactions after `saved`. The caller owns the cursor.
 /// Without a cursor it starts at the current tip and records nothing.
 pub async fn poll(rpc: &impl Rpc, cfg: &SolanaConfig, saved: Option<&Cursor>) -> Result<Batch> {
+    poll_with(rpc, cfg, saved, &mut Memory::default()).await
+}
+
+pub async fn poll_with(
+    rpc: &impl Rpc,
+    cfg: &SolanaConfig,
+    saved: Option<&Cursor>,
+    mem: &mut Memory,
+) -> Result<Batch> {
     let addresses: BTreeSet<&String> = cfg.addresses.iter().collect();
     let max = cfg.max_signatures.max(1) as usize;
-    let mut records = vec![];
-    let mut seen = BTreeSet::new();
     let mut last = BTreeMap::new();
-    let mut more = false;
-    for address in addresses {
-        let Some(saved) = saved else {
+    let Some(saved) = saved else {
+        for address in addresses {
             if let Some(tip) = signatures(rpc, address, None, None, 1).await?.pop() {
                 last.insert(
                     address.clone(),
@@ -237,20 +374,37 @@ pub async fn poll(rpc: &impl Rpc, cfg: &SolanaConfig, saved: Option<&Cursor>) ->
                     },
                 );
             }
-            continue;
-        };
+        }
+        return Ok(Batch {
+            records: vec![],
+            last,
+            more: false,
+        });
+    };
+
+    let mut records = vec![];
+    let mut listed = vec![];
+    for address in addresses {
         let until = saved.last.get(address);
-        let (pending, skipped) = backlog(rpc, address, until).await?;
+        let (pending, skipped) = pending_for(rpc, address, until, mem).await?;
         if skipped {
             records.push(gap_record(address));
         }
-        more |= pending.len() > max;
-        let take = &pending[..pending.len().min(max)];
+        listed.push((address, until, pending));
+    }
+    let slices: Vec<&[SigInfo]> = listed.iter().map(|(_, _, p)| p.as_slice()).collect();
+    let counts = take_counts(&slices, max);
+
+    let mut seen = BTreeSet::new();
+    let mut more = false;
+    for ((address, until, pending), count) in listed.iter().zip(counts) {
+        more |= count < pending.len();
+        let take = &pending[..count];
         for info in take {
             // a transaction touching several watched addresses is recorded once
             if seen.insert(info.signature.clone()) {
-                let tx = transaction(rpc, &info.signature).await?;
-                records.push(to_record(address, info, tx.as_ref()));
+                let (tx, logs_error) = fetch(rpc, info, mem).await?;
+                records.push(to_record(address, info, tx.as_ref(), logs_error.as_deref()));
             }
         }
         let newest = take
@@ -259,9 +413,9 @@ pub async fn poll(rpc: &impl Rpc, cfg: &SolanaConfig, saved: Option<&Cursor>) ->
                 signature: i.signature.clone(),
                 slot: i.slot,
             })
-            .or(until.cloned());
+            .or_else(|| (*until).cloned());
         if let Some(newest) = newest {
-            last.insert(address.clone(), newest);
+            last.insert((*address).clone(), newest);
         }
     }
     Ok(Batch {
@@ -349,6 +503,7 @@ pub struct SolanaWatcher<R> {
     rpc: R,
     cfg: SolanaConfig,
     bound: Option<String>,
+    memory: Memory,
 }
 
 impl SolanaWatcher<HttpRpc> {
@@ -363,6 +518,7 @@ impl<R: Rpc> SolanaWatcher<R> {
             rpc,
             cfg,
             bound: None,
+            memory: Memory::default(),
         }
     }
 }
@@ -393,7 +549,7 @@ impl<R: Rpc> Watcher for SolanaWatcher<R> {
         if let Some(c) = &saved {
             check_binding(c, &current)?;
         }
-        let batch = poll(&self.rpc, &self.cfg, saved.as_ref()).await?;
+        let batch = poll_with(&self.rpc, &self.cfg, saved.as_ref(), &mut self.memory).await?;
         self.bound = Some(current.clone());
         let cursor = Cursor {
             binding: current,

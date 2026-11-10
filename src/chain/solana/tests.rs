@@ -22,6 +22,7 @@ struct Mock {
     genesis: String,
     fail_tx: bool,
     max_page: usize,
+    recent: bool,
     calls: RefCell<Vec<(String, Value)>>,
 }
 
@@ -33,6 +34,7 @@ impl Mock {
             genesis: GENESIS.into(),
             fail_tx: false,
             max_page: usize::MAX,
+            recent: false,
             calls: RefCell::new(vec![]),
         }
     }
@@ -110,7 +112,7 @@ impl Rpc for Mock {
                     .take(limit)
                     .map(|(n, err)| {
                         json!({"signature": sig(*n), "slot": 1000 + n, "err": err,
-                               "blockTime": 1_700_000_000 + n, "confirmationStatus": "finalized"})
+                               "blockTime": if self.recent { now() as u64 } else { 1_700_000_000 + n }, "confirmationStatus": "finalized"})
                     })
                     .collect();
                 Ok(Value::Array(page))
@@ -129,6 +131,13 @@ impl Rpc for Mock {
             other => panic!("unexpected rpc {other}"),
         }
     }
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
 }
 
 fn cfg() -> SolanaConfig {
@@ -523,4 +532,184 @@ fn a_null_meta_counts_as_no_logs() {
     let b = block_on(poll(&rpc, &cfg(), Some(&cursor_at(ADDR, 0)))).unwrap();
     let m = b.records[0].metadata.as_ref().unwrap();
     assert_eq!(m["logs_available"], false);
+}
+
+fn cursor_from(b: Batch) -> Cursor {
+    Cursor {
+        binding: "b".into(),
+        last: b.last,
+    }
+}
+
+fn info(n: u64, slot: u64) -> SigInfo {
+    SigInfo {
+        signature: sig(n),
+        slot,
+        block_time: None,
+        err: None,
+    }
+}
+
+#[test]
+fn a_transaction_that_always_errors_is_recorded_without_logs_and_the_watcher_moves_on() {
+    let mut rpc = Mock::new().with(ADDR, 1..=3);
+    rpc.fail_tx = true;
+    let mut mem = Memory::default();
+    let mut cur = cursor_at(ADDR, 0);
+    let mut recorded = vec![];
+    let mut errors = 0;
+    for _ in 0..40 {
+        match block_on(poll_with(&rpc, &cfg(), Some(&cur), &mut mem)) {
+            Ok(b) => {
+                recorded.extend(b.records.iter().filter_map(|r| r.metadata.clone()));
+                cur = cursor_from(b);
+            }
+            Err(_) => errors += 1,
+        }
+        if cur.last[ADDR].signature == sig(3) {
+            break;
+        }
+    }
+    assert_eq!(
+        cur.last[ADDR].signature,
+        sig(3),
+        "stalled after {errors} errors"
+    );
+    assert_eq!(recorded.len(), 3);
+    assert!(recorded.iter().all(|m| m["logs_available"] == false));
+    assert!(recorded[0]["logs_error"].as_str().unwrap().contains("boom"));
+    assert!(errors >= MAX_TX_ATTEMPTS as usize - 1);
+}
+
+#[test]
+fn a_recent_transaction_the_node_does_not_have_yet_is_retried_then_given_up() {
+    let mut rpc = Mock::new().with(ADDR, 1..=1);
+    rpc.recent = true;
+    let mut mem = Memory::default();
+    let cur = cursor_at(ADDR, 0);
+    for _ in 0..MAX_TX_ATTEMPTS - 1 {
+        let e = block_on(poll_with(&rpc, &cfg(), Some(&cur), &mut mem))
+            .err()
+            .unwrap();
+        assert!(e.to_string().contains("yet"), "{e}");
+    }
+    let b = block_on(poll_with(&rpc, &cfg(), Some(&cur), &mut mem)).unwrap();
+    assert_eq!(
+        b.records[0].metadata.as_ref().unwrap()["logs_available"],
+        false
+    );
+}
+
+#[test]
+fn a_recent_transaction_that_appears_later_is_recorded_with_its_logs() {
+    let mut rpc = Mock::new().with(ADDR, 1..=1);
+    rpc.recent = true;
+    let mut mem = Memory::default();
+    let cur = cursor_at(ADDR, 0);
+    assert!(block_on(poll_with(&rpc, &cfg(), Some(&cur), &mut mem)).is_err());
+    let rpc = Mock::new()
+        .with(ADDR, 1..=1)
+        .with_tx(1, vec!["Program log: ok"]);
+    let b = block_on(poll_with(&rpc, &cfg(), Some(&cur), &mut mem)).unwrap();
+    assert_eq!(
+        b.records[0].metadata.as_ref().unwrap()["logs"],
+        json!(["Program log: ok"])
+    );
+    assert!(mem.failures.is_empty());
+}
+
+#[test]
+fn a_catch_up_lists_the_backlog_once_and_loses_nothing_if_a_send_fails() {
+    let rpc = Mock::new().with(ADDR, 1..=250);
+    let c = SolanaConfig {
+        max_signatures: 100,
+        ..cfg()
+    };
+    let mut mem = Memory::default();
+    let cur = cursor_at(ADDR, 0);
+    let first = block_on(poll_with(&rpc, &c, Some(&cur), &mut mem)).unwrap();
+    let listings = rpc.count("getSignaturesForAddress");
+    // the send failed: the same cursor is polled again and must give the same transactions
+    let again = block_on(poll_with(&rpc, &c, Some(&cur), &mut mem)).unwrap();
+    assert_eq!(hashes(&first), hashes(&again));
+    let second = block_on(poll_with(&rpc, &c, Some(&cursor_from(first)), &mut mem)).unwrap();
+    assert_eq!(hashes(&second), (101..=200).map(sig).collect::<Vec<_>>());
+    let third = block_on(poll_with(&rpc, &c, Some(&cursor_from(second)), &mut mem)).unwrap();
+    assert_eq!(hashes(&third), (201..=250).map(sig).collect::<Vec<_>>());
+    assert!(!third.more);
+    assert_eq!(rpc.count("getSignaturesForAddress"), listings);
+}
+
+#[test]
+fn the_skipped_gap_is_reported_again_until_something_is_sent() {
+    let rpc = Mock::new().with(ADDR, 1..=11_000);
+    let mut mem = Memory::default();
+    let cur = cursor_at(ADDR, 0);
+    for _ in 0..2 {
+        let b = block_on(poll_with(&rpc, &cfg(), Some(&cur), &mut mem)).unwrap();
+        assert_eq!(b.records.iter().filter(|r| r.level == "warn").count(), 1);
+    }
+    let b = block_on(poll_with(&rpc, &cfg(), Some(&cur), &mut mem)).unwrap();
+    let next = block_on(poll_with(&rpc, &cfg(), Some(&cursor_from(b)), &mut mem)).unwrap();
+    assert!(next.records.iter().all(|r| r.level != "warn"));
+}
+
+#[test]
+fn a_new_transaction_is_seen_once_the_cached_backlog_is_used_up() {
+    let mut mem = Memory::default();
+    let c = SolanaConfig {
+        max_signatures: 100,
+        ..cfg()
+    };
+    let rpc = Mock::new().with(ADDR, 1..=150);
+    let b1 = block_on(poll_with(&rpc, &c, Some(&cursor_at(ADDR, 0)), &mut mem)).unwrap();
+    let rpc = Mock::new().with(ADDR, 1..=160);
+    let b2 = block_on(poll_with(&rpc, &c, Some(&cursor_from(b1)), &mut mem)).unwrap();
+    assert_eq!(b2.records.len(), 50);
+    let b3 = block_on(poll_with(&rpc, &c, Some(&cursor_from(b2)), &mut mem)).unwrap();
+    assert_eq!(hashes(&b3), (151..=160).map(sig).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_transaction_on_two_addresses_is_recorded_once_even_when_one_is_capped() {
+    let rpc = Mock::new().with(ADDR, 1..=5).with(ADDR2, 5..=5);
+    let c = SolanaConfig {
+        addresses: vec![ADDR.into(), ADDR2.into()],
+        max_signatures: 2,
+        ..cfg()
+    };
+    let mut mem = Memory::default();
+    let mut cur = Cursor {
+        binding: "b".into(),
+        last: BTreeMap::from([(ADDR.into(), mark(0)), (ADDR2.into(), mark(4))]),
+    };
+    let mut all = vec![];
+    for _ in 0..10 {
+        let b = block_on(poll_with(&rpc, &c, Some(&cur), &mut mem)).unwrap();
+        all.extend(hashes(&b));
+        let more = b.more;
+        cur = cursor_from(b);
+        if !more {
+            break;
+        }
+    }
+    let mut sorted = all.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(all.len(), 5, "{all:?}");
+    assert_eq!(sorted, (1..=5).map(sig).collect::<Vec<_>>());
+}
+
+#[test]
+fn take_counts_stops_at_the_busiest_capped_slot_and_always_progresses() {
+    let a: Vec<SigInfo> = (1..=5).map(|n| info(n, 100 + n)).collect();
+    let b = vec![info(5, 105), info(6, 106)];
+    assert_eq!(take_counts(&[&a, &b], 3), [2, 0]);
+    let quiet = vec![info(1, 101)];
+    assert_eq!(take_counts(&[&a, &quiet], 3), [2, 1]);
+    assert_eq!(take_counts(&[&quiet], 3), [1]);
+    // one slot holding more than the cap is taken up to the cap rather than stalling
+    let same: Vec<SigInfo> = (1..=5).map(|n| info(n, 7)).collect();
+    assert_eq!(take_counts(&[&same], 3), [3]);
+    assert_eq!(take_counts(&[&[], &quiet], 3), [0, 1]);
 }

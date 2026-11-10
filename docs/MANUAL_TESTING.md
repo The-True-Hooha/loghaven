@@ -123,8 +123,8 @@ followed by the number, digits written as `a`..`j` (transaction 105 is `S…Sbaf
 | `echo 200 > /tmp/lh-sol-state/tip`, run again | three batches of 30, then caught up |
 | `loghaven trace S…Sbaf --app solana` | one `error` record, `failed` in the message |
 | the same with the signature in lower case | 0 records (case sensitive) |
-| `echo 1 > /tmp/lh-sol-state/fail` | error `rpc getTransaction error`; cursor unchanged |
-| `echo 1 > /tmp/lh-sol-state/nulltx` | recorded with `logs_available: false` |
+| `echo 1 > /tmp/lh-sol-state/fail` | `--once` errors with `rpc getTransaction error`, cursor unchanged; `watch solana` without `--once` retries, and after 5 tries records the transaction with `logs_error` and moves on |
+| `echo 1 > /tmp/lh-sol-state/nulltx` | recorded with `logs_available: false` (the mock's block times are old, so it counts as pruned) |
 | `echo 1 > /tmp/lh-sol-state/big` | recorded, `logs_truncated: true` |
 | `echo AAAA… > /tmp/lh-sol-state/genesis` | error: cursor was saved for another cluster; exit code 1 |
 | stop the mock node | error without the RPC URL |
