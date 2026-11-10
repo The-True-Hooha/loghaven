@@ -179,3 +179,32 @@ Transaction `n` has hash `%064x` of `n`; every 7th failed.
 | `echo Public > /tmp/lh-xlm-state/passphrase` | error: cursor was saved for another network; exit code 1 |
 | stop the daemon | error reaching the query server, cursor unchanged (`--once` exits; without it the watcher retries) |
 
+## Phase 3: `tui`
+
+Run in a real terminal with the daemon up and `flush_interval_secs = 1`. Send some records first:
+
+```bash
+TX=0x$(printf 'ab%.0s' $(seq 32))
+loghaven send web "first line"
+loghaven send web "payment confirmed" --chain ethereum --tx-hash $TX
+loghaven send api "indexed" --level warn --chain ethereum --tx-hash $TX
+loghaven send web $'evil \x1b[2J\x1b]0;pwned\x07 line'
+loghaven tui --app web --app api
+```
+
+| Try | Expect |
+|-----|--------|
+| open it | the four records, the app column, `following` in the header |
+| the evil line | shown as `evil ·[2J·]0;pwned· line`; the screen is not cleared and the window title does not change |
+| send another record from a second terminal | it appears within a few seconds and the highlight follows it |
+| `k`, then send another | the highlight stays on its record; header says `paused`; `p` or `G` resumes |
+| `/` `payment` Enter | only matching records; Esc clears it |
+| `l` | cycles the level filter shown in the header |
+| `k` onto the `payment` line, then `t` | `TRACE 0xabab…` with the web and api records, oldest first; Esc goes back |
+| `t` on a record without a hash | footer says it has no tx_hash |
+| Enter | all fields of the highlighted record |
+| stop the daemon | footer shows the error; it clears when the daemon is back |
+| resize the window very small | no crash |
+| `q` | the terminal is restored (no stray characters, cursor visible) |
+| `loghaven tui --app web < /dev/null` | error: needs an interactive terminal |
+

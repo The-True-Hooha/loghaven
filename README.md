@@ -122,6 +122,7 @@ Every command accepts `--profile <NAME>` to use `<NAME>.toml` instead of `config
 | `loghaven watch ethereum [--once]` | Poll Ethereum contract logs and record them as logs (settings in `[chains.ethereum]`, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#chainsethereum)). |
 | `loghaven watch solana [--once]` | Poll finalized Solana transactions for configured addresses and record them as logs (settings in `[chains.solana]`, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#chainssolana)). |
 | `loghaven watch stellar [--once]` | Poll Stellar account transactions from a Horizon server and record them as logs (settings in `[chains.stellar]`, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#chainsstellar)). |
+| `loghaven tui --app <APP> [--app <APP>...] [--token T]` | Live terminal view of one or more apps' logs (see [Terminal UI](#terminal-ui)). Needs an interactive terminal. |
 | `loghaven trace <TX_HASH> --app <APP> [--app <APP>...]` | Show the records that carry one transaction hash, oldest first, merged across the apps you name. Options: `--from MS`, `--to MS`, `--limit` (default 1000: newest N per app and overall), `--token` (one app only). `0x`+hex hashes match ignoring case (they are stored lowercase in chunks written after v0.2.0); other chains match exactly. |
 | `loghaven logs <APP> [options]` | Query records. Options: `--level`, `--source`, `--from MS`, `--to MS`, `--text`, `--limit` (default 100), `--token`, `--follow`. |
 
@@ -234,6 +235,29 @@ Three overrides are applied on top of the file: `LOGHAVEN_STORAGE_BACKEND`, `LOG
 | `403` on `/logs` | The token belongs to a different app than the `app` parameter. |
 | Uploaded data missing from queries | `delete_after_upload = true` removes local chunks; queries only read local files. |
 
+## Terminal UI
+
+`loghaven tui --app web [--app api ...]` opens a live view of those apps' logs, merged by time. It loads
+the newest 200 records per app, then follows new ones the same way `logs --follow` does (new records can
+take up to the flush interval to appear). Each app gets its own session, so scoping is unchanged; `--token`
+is for a single app. It keeps the newest 5000 records in memory.
+
+| Key | Action |
+|-----|--------|
+| `j` / `k`, arrows, PageUp/PageDown | Move the highlight. Moving to the newest row resumes following; moving away pauses it. |
+| `g` / `G` | Oldest loaded record / newest record (and follow). |
+| `p` | Pause or resume following. |
+| `/` | Type a text filter (case-insensitive over message, source, app, tx hash, trace id, chain, tags). Enter applies, Esc cancels, Ctrl+U clears the line. |
+| `l` | Cycle the level filter: all, error, warn and up, info and up. |
+| `t` | Trace the highlighted record's `tx_hash`: fetch every record with it from all the apps you opened, oldest first. Esc returns to the live view. |
+| `Enter` | Show every field of the highlighted record. |
+| `Esc` | Leave a trace, or clear the text filter. |
+| `q`, Ctrl+C | Quit. |
+
+Filters apply to the records already loaded; a trace asks the daemon, so it also finds older records.
+Times are UTC. Log content is untrusted, so control and bidirectional-override characters are shown as `·`.
+The terminal is restored on exit and on a crash.
+
 ## Roadmap
 
 LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
@@ -273,7 +297,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 
 ### Phase 3 - Interfaces
 
-- Terminal UI
+- Done: terminal UI (`loghaven tui`)
 - Local web dashboard on the query API
 
 ### Phase 4 - Production hardening

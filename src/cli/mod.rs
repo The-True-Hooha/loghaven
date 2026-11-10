@@ -150,6 +150,27 @@ pub enum Commands {
         profile: Option<String>,
     },
 
+    #[command(about = "Live terminal view of one or more apps' logs")]
+    Tui {
+        #[arg(
+            long = "app",
+            value_name = "APP",
+            required = true,
+            help = "App to show; repeat to merge several apps"
+        )]
+        apps: Vec<String>,
+
+        #[arg(
+            long,
+            value_name = "TOKEN",
+            help = "Session token_id; only valid for one app, so omit it with several --app"
+        )]
+        token: Option<String>,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+
     #[command(about = "Show the records that carry one transaction hash, oldest first")]
     Trace {
         #[arg(value_name = "TX_HASH")]
@@ -311,6 +332,11 @@ pub fn execute(cli: Cli) -> crate::error::Result<()> {
         Some(Commands::Watch {
             chain: WatchCommands::Stellar { once, profile },
         }) => commands::watch_stellar(once, profile.as_deref()),
+        Some(Commands::Tui {
+            apps,
+            token,
+            profile,
+        }) => crate::tui::run(apps, token, profile.as_deref()),
         Some(Commands::Trace {
             tx_hash,
             apps,
