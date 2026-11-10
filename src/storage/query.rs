@@ -38,10 +38,11 @@ impl Default for QueryFilter {
     }
 }
 
-/// EVM hashes are hex, so `0xABC` and `0xabc` name the same transaction.
+/// EVM hashes are hex, so `0xABC`, `0Xabc` and `0xabc` name the same transaction.
 /// Other chains (base58 and similar) are case-sensitive.
 pub fn is_evm_hash(h: &str) -> bool {
     h.strip_prefix("0x")
+        .or_else(|| h.strip_prefix("0X"))
         .is_some_and(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
@@ -215,6 +216,107 @@ fn overlapping_row_groups(
         .collect()
 }
 
+/// Row groups that can hold a match: inside the time range and, when a
+/// `tx_hash` is wanted, with a tx_hash min/max range that can contain it.
+fn row_groups_to_read(
+    meta: &parquet::file::metadata::ParquetMetaData,
+    filter: &QueryFilter,
+) -> Vec<usize> {
+    use parquet::file::statistics::Statistics;
+    let mut groups = overlapping_row_groups(meta, filter.from_ms, filter.to_ms);
+    let Some(want) = filter.tx_hash.as_deref() else {
+        return groups;
+    };
+    let Some(col) = meta
+        .file_metadata()
+        .schema_descr()
+        .columns()
+        .iter()
+        .position(|c| c.name() == "tx_hash")
+    else {
+        return groups;
+    };
+    // An EVM match ignores ASCII case. For a fixed prefix every spelling sorts
+    // between the all-upper and the all-lower hex part (digits are case-less,
+    // 'A'..'F' < 'a'..'f'), and the prefix itself can be "0x" or "0X".
+    let ranges: Vec<(String, String)> = if is_evm_hash(want) {
+        let hex = &want[2..];
+        ["0x", "0X"]
+            .iter()
+            .map(|p| {
+                (
+                    format!("{p}{}", hex.to_ascii_uppercase()),
+                    format!("{p}{}", hex.to_ascii_lowercase()),
+                )
+            })
+            .collect()
+    } else {
+        vec![(want.to_string(), want.to_string())]
+    };
+    groups.retain(|&i| {
+        let Some(Statistics::ByteArray(st)) = meta.row_group(i).column(col).statistics() else {
+            return true;
+        };
+        let (Some(min), Some(max)) = (st.min_opt(), st.max_opt()) else {
+            return true;
+        };
+        ranges
+            .iter()
+            .any(|(low, high)| !(max.data() < low.as_bytes() || min.data() > high.as_bytes()))
+    });
+    groups
+}
+
+/// Drops row groups whose tx_hash bloom filter proves the wanted hash is absent.
+/// An EVM hash is only tested in files that record lowercase storage; a missing
+/// filter or an unreadable one keeps the group.
+fn bloom_filtered(
+    builder: &ParquetRecordBatchReaderBuilder<File>,
+    groups: Vec<usize>,
+    filter: &QueryFilter,
+) -> Vec<usize> {
+    let Some(want) = filter.tx_hash.as_deref() else {
+        return groups;
+    };
+    let evm = is_evm_hash(want);
+    let folded = builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .is_some_and(|kv| {
+            kv.iter().any(|k| {
+                k.key == crate::storage::writer::TX_FOLDED_KEY && k.value.as_deref() == Some("1")
+            })
+        });
+    if evm && !folded {
+        return groups;
+    }
+    let Some(col) = builder
+        .metadata()
+        .file_metadata()
+        .schema_descr()
+        .columns()
+        .iter()
+        .position(|c| c.name() == "tx_hash")
+    else {
+        return groups;
+    };
+    let spelling = if evm {
+        want.to_ascii_lowercase()
+    } else {
+        want.to_string()
+    };
+    groups
+        .into_iter()
+        .filter(
+            |&i| match builder.get_row_group_column_bloom_filter(i, col) {
+                Ok(Some(bloom)) => bloom.check(spelling.as_str()),
+                _ => true,
+            },
+        )
+        .collect()
+}
+
 /// Reads the records of one chunk that match `filter`. Rows are checked
 /// against the column arrays first, so non-matching rows never allocate a
 /// `LogRecord`.
@@ -228,7 +330,11 @@ fn read_parquet_file(
     let file = File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| LogHavenError::Storage(e.to_string()))?;
-    let groups = overlapping_row_groups(builder.metadata(), from_ms, to_ms);
+    let groups = bloom_filtered(
+        &builder,
+        row_groups_to_read(builder.metadata(), filter),
+        filter,
+    );
     if groups.is_empty() {
         return Ok(Vec::new());
     }
@@ -426,6 +532,207 @@ mod tests {
             ..filter()
         });
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn tx_hash_filter_skips_row_groups_that_cannot_hold_it() {
+        let fx = Fixture::new("txrg");
+        // parquet truncates byte-array statistics to 64 bytes, so values must differ early
+        let tx = |n: usize| format!("0x{:02x}{:062x}", n / 1000 * 0x40 + 0x10, n % 1000);
+        let records: Vec<_> = (0..30)
+            .map(|i| {
+                let mut r = rec(T0 + i as i64, "m");
+                r.tx_hash = Some(tx(i / 10 * 1000 + i % 10));
+                r
+            })
+            .collect();
+        let path = fx
+            .tmp
+            .join("web")
+            .join(date_from_ms(T0))
+            .join("1-1.parquet");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let props = parquet::file::properties::WriterProperties::builder()
+            .set_max_row_group_row_count(Some(10))
+            .build();
+        let mut w = parquet::arrow::ArrowWriter::try_new(
+            File::create(&path).unwrap(),
+            crate::storage::record::log_schema(),
+            Some(props),
+        )
+        .unwrap();
+        w.write(&crate::storage::record::records_to_batch(&records).unwrap())
+            .unwrap();
+        w.close().unwrap();
+
+        let b = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
+        assert_eq!(b.metadata().num_row_groups(), 3);
+        let groups = |t: &str| {
+            row_groups_to_read(
+                b.metadata(),
+                &QueryFilter {
+                    tx_hash: Some(t.into()),
+                    ..filter()
+                },
+            )
+        };
+        assert_eq!(groups(&tx(1003)), vec![1]);
+        assert_eq!(
+            groups(&tx(1003).to_uppercase().replace("0X", "0x")),
+            vec![1]
+        );
+        assert_eq!(groups(&tx(2005)), vec![2]);
+        assert!(groups(&tx(999_999)).is_empty());
+        assert_eq!(groups("not-evm").len(), 0);
+        let none = row_groups_to_read(b.metadata(), &filter());
+        assert_eq!(none, vec![0, 1, 2]);
+        let got = read_parquet_file(
+            &path,
+            &QueryFilter {
+                tx_hash: Some(tx(1003)),
+                ..filter()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(got.len(), 1);
+    }
+
+    #[test]
+    fn pruning_keeps_row_groups_whose_hash_uses_another_case_or_prefix() {
+        let mut fx = Fixture::new("txcase");
+        let mut r = rec(T0, "upper prefix");
+        r.tx_hash = Some(format!("0X{}", "AB".repeat(32)));
+        fx.chunk("web", vec![r]);
+        let got = fx.q(QueryFilter {
+            tx_hash: Some(format!("0x{}", "ab".repeat(32))),
+            ..filter()
+        });
+        assert_eq!(msgs(&got), ["upper prefix"]);
+    }
+
+    fn hash_rec(ts: i64, tx: &str) -> LogRecord {
+        let mut r = rec(ts, "m");
+        r.tx_hash = Some(tx.into());
+        r
+    }
+
+    fn bloom_groups(path: &Path, tx: &str) -> Vec<usize> {
+        let f = QueryFilter {
+            tx_hash: Some(tx.into()),
+            ..filter()
+        };
+        let b = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap()).unwrap();
+        bloom_filtered(&b, row_groups_to_read(b.metadata(), &f), &f)
+    }
+
+    #[test]
+    fn bloom_filter_skips_a_row_group_that_min_max_cannot() {
+        let mut fx = Fixture::new("bloom");
+        let at = |hex: &str| format!("0x{hex}{}", "0".repeat(62));
+        let path = fx.chunk(
+            "web",
+            vec![
+                hash_rec(T0, &at("00")),
+                hash_rec(T0 + 1, &at("ab")),
+                hash_rec(T0 + 2, &at("ff")),
+            ],
+        );
+        assert_eq!(bloom_groups(&path, &at("ab")), vec![0]);
+        assert!(
+            bloom_groups(&path, &at("40")).is_empty(),
+            "inside min/max, not in bloom"
+        );
+        assert_eq!(
+            bloom_groups(&path, &at("ab").to_uppercase().replace("0X", "0x")),
+            vec![0]
+        );
+        let got = read_parquet_file(
+            &path,
+            &QueryFilter {
+                tx_hash: Some(at("40")),
+                ..filter()
+            },
+            None,
+        )
+        .unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn non_evm_hashes_use_the_bloom_filter_with_exact_case() {
+        let mut fx = Fixture::new("bloomsol");
+        let path = fx.chunk(
+            "web",
+            vec![
+                hash_rec(T0, "5VERv8NMvz"),
+                hash_rec(T0 + 1, "zzzzzzzzzz"),
+                hash_rec(T0 + 2, "3aaaaaaaaa"),
+            ],
+        );
+        assert_eq!(bloom_groups(&path, "5VERv8NMvz"), vec![0]);
+        assert!(bloom_groups(&path, "5verv8nmvz").is_empty());
+        assert!(bloom_groups(&path, "4mmmmmmmmm").is_empty());
+    }
+
+    #[test]
+    fn evm_hashes_are_stored_lowercase_and_found_in_any_case() {
+        let mut fx = Fixture::new("fold");
+        let path = fx.chunk("web", vec![hash_rec(T0, &format!("0X{}", "AB".repeat(32)))]);
+        let got = read_parquet_file(&path, &filter(), None).unwrap();
+        assert_eq!(
+            got[0].tx_hash.as_deref(),
+            Some(format!("0x{}", "ab".repeat(32)).as_str())
+        );
+        for spelling in [
+            format!("0x{}", "ab".repeat(32)),
+            format!("0x{}", "AB".repeat(32)),
+        ] {
+            let got = fx.q(QueryFilter {
+                tx_hash: Some(spelling),
+                ..filter()
+            });
+            assert_eq!(got.len(), 1);
+        }
+    }
+
+    #[test]
+    fn files_without_the_fold_flag_skip_the_bloom_filter_for_evm_hashes() {
+        let fx = Fixture::new("legacy");
+        let path = fx
+            .tmp
+            .join("web")
+            .join(date_from_ms(T0))
+            .join("1-1.parquet");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let stored = format!("0x{}", "AB".repeat(32));
+        let props = parquet::file::properties::WriterProperties::builder()
+            .set_column_bloom_filter_enabled(
+                parquet::schema::types::ColumnPath::from("tx_hash"),
+                true,
+            )
+            .build();
+        let mut w = parquet::arrow::ArrowWriter::try_new(
+            File::create(&path).unwrap(),
+            crate::storage::record::log_schema(),
+            Some(props),
+        )
+        .unwrap();
+        w.write(&crate::storage::record::records_to_batch(&[hash_rec(T0, &stored)]).unwrap())
+            .unwrap();
+        w.close().unwrap();
+        let want = format!("0x{}", "ab".repeat(32));
+        assert_eq!(bloom_groups(&path, &want), vec![0]);
+        let got = read_parquet_file(
+            &path,
+            &QueryFilter {
+                tx_hash: Some(want),
+                ..filter()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(got.len(), 1);
     }
 
     #[test]

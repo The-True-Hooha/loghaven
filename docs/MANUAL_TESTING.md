@@ -90,6 +90,8 @@ max_block_range = 100
 | stop the mock node | error without the RPC URL (`SECRETKEY` never appears) |
 | `echo junk > ethereum.cursor` | error: not a block number |
 | `echo 99999999 > ethereum.cursor` | error: far ahead of the chain head |
+| change `addresses`, then run again | error: cursor was saved for another chain or other addresses/topics |
+| `echo 137 > /tmp/lh-state/chainid`, run again | the same error |
 | stop the daemon | error reaching the query server; cursor unchanged |
 | `cat /tmp/lh-state/lastfilter.json` | the address list and, with `topics` set, `"topics": [[...]]` |
 | `loghaven trace 0x…03de --app ethereum` | the event for block 990 (`%064x` of 990) |

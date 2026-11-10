@@ -165,8 +165,11 @@ How it behaves:
 - If the node refuses a range because it matches too many logs, the watcher
   retries on half the span, down to one block. A single block the node still
   refuses stops the watcher with an error naming that block.
-- Adding an address later does not backfill it: the cursor is not tied to the
-  address list. Delete the cursor and set `start_block` to re-read history.
+- The cursor remembers the chain id and the address and topic lists it was saved
+  for. If you change them, or point `rpc_url` at another chain, the watcher stops
+  with an error instead of continuing from a block number that no longer fits.
+  Delete `ethereum.cursor` and set `start_block` to re-read history with the new
+  settings. A cursor file from 0.2.0 has no such record: it is accepted without a check, a warning is printed, and the current settings are recorded from then on. A settings or cursor-file error stops the watcher; network errors are retried. The node must support `eth_chainId`.
 - `ws_url` is accepted but unused; the adapter polls over HTTP.
 - If your node rejects a range because it holds too many logs, lower
   `max_block_range`.

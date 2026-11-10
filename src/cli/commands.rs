@@ -562,8 +562,15 @@ pub fn trace(
     })
 }
 
+/// Settings and cursor-file problems need a person; network problems may pass.
+fn is_fatal_watch_error(e: &crate::error::LogHavenError) -> bool {
+    matches!(e, crate::error::LogHavenError::Config(_))
+}
+
 pub fn watch_ethereum(once: bool, profile: Option<&str>) -> Result<()> {
-    use crate::chain::ethereum::{HttpRpc, poll, read_cursor, write_cursor};
+    use crate::chain::ethereum::{
+        HttpRpc, binding, check_binding, poll, read_cursor, write_cursor,
+    };
 
     let config_path = config::get_config_path(profile);
     let cfg = Config::load(&config_path)?;
@@ -584,13 +591,32 @@ pub fn watch_ethereum(once: bool, profile: Option<&str>) -> Result<()> {
             eth.app
         ));
         let mut last_warning = String::new();
+        let mut bound: Option<String> = None;
         loop {
             let step_fut = async {
                 let cursor = read_cursor(&cursor_path)?;
                 let batch = tokio::select! {
                     _ = tokio::signal::ctrl_c() => return Ok(None),
-                    b = poll(&rpc, &eth, cursor) => b?,
+                    b = async {
+                        let current = match &bound {
+                            Some(b) => b.clone(),
+                            None => binding(&rpc, &eth).await?,
+                        };
+                        if let Some(c) = &cursor {
+                            check_binding(c, &current)?;
+                            if c.binding.is_none() {
+                                style::warning(
+                                    "ethereum.cursor has no chain/address record (older version); \
+                                     adopting the current settings",
+                                );
+                            }
+                        }
+                        let batch = poll(&rpc, &eth, cursor.map(|c| c.next_block)).await?;
+                        Ok::<_, crate::error::LogHavenError>((batch, current))
+                    } => b?,
                 };
+                let (batch, current) = batch;
+                bound = Some(current.clone());
                 // not cancellable: the cursor must follow a send that has started
                 if !batch.records.is_empty() {
                     let mut client =
@@ -599,7 +625,7 @@ pub fn watch_ethereum(once: bool, profile: Option<&str>) -> Result<()> {
                     client.send(&batch.records).await?;
                     style::info(&format!("Recorded {} event(s)", batch.records.len()));
                 }
-                write_cursor(&cursor_path, batch.next_block)?;
+                write_cursor(&cursor_path, batch.next_block, &current)?;
                 Ok::<_, crate::error::LogHavenError>(Some(batch.more))
             };
             let step = match step_fut.await {
@@ -614,7 +640,7 @@ pub fn watch_ethereum(once: bool, profile: Option<&str>) -> Result<()> {
                 }
                 // the node or daemon may be down for a while; retry, saying each problem once
                 Err(e) => {
-                    if once {
+                    if once || is_fatal_watch_error(&e) {
                         return Err(e);
                     }
                     let msg = e.to_string();
@@ -829,5 +855,12 @@ mod tests {
         };
         assert_eq!(ids(merge_trace(input(), 10)), ["m", "z", "a", "b"]);
         assert_eq!(ids(merge_trace(input(), 2)), ["a", "b"]);
+    }
+
+    #[test]
+    fn watch_stops_on_config_errors_but_retries_network_errors() {
+        use crate::error::LogHavenError;
+        assert!(is_fatal_watch_error(&LogHavenError::Config("x".into())));
+        assert!(!is_fatal_watch_error(&LogHavenError::Daemon("x".into())));
     }
 }

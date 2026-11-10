@@ -240,26 +240,71 @@ fn to_record(l: &RawLog, block_timestamp: u64) -> ClientRecord {
     }
 }
 
+pub struct Cursor {
+    pub next_block: u64,
+    /// Absent in cursor files written by 0.2.0, which are adopted on the next save.
+    pub binding: Option<String>,
+}
+
+/// Identifies what a cursor was saved for: the chain and the watched addresses and topics.
+pub async fn binding(rpc: &impl Rpc, cfg: &EthereumConfig) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let chain_id = quantity(&rpc.call("eth_chainId", json!([])).await?, "chain id")?;
+    let sorted = |v: &[String]| {
+        let mut v: Vec<String> = v.iter().map(|s| s.to_ascii_lowercase()).collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let text = json!([chain_id, sorted(&cfg.addresses), sorted(&cfg.topics)]).to_string();
+    Ok(hex::encode(Sha256::digest(text.as_bytes())))
+}
+
+pub fn check_binding(cursor: &Cursor, current: &str) -> Result<()> {
+    match &cursor.binding {
+        Some(saved) if saved != current => Err(LogHavenError::Config(
+            "ethereum.cursor was saved for another chain or other addresses/topics; \
+             delete it and set start_block to re-read history, or restore the old settings"
+                .into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// `Ok(None)` only when the file does not exist. A garbled file is an error:
 /// guessing a start block would either replay history or skip a gap.
-pub fn read_cursor(path: &Path) -> Result<Option<u64>> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => text.trim().parse().map(Some).map_err(|_| {
+pub fn read_cursor(path: &Path) -> Result<Option<Cursor>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut lines = text.lines();
+    let next_block = lines
+        .next()
+        .and_then(|l| l.trim().parse().ok())
+        .ok_or_else(|| {
             LogHavenError::Config(format!(
                 "{} is not a block number; fix or delete it",
                 path.display()
             ))
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
-    }
+        })?;
+    let binding = lines
+        .next()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(str::to_string);
+    Ok(Some(Cursor {
+        next_block,
+        binding,
+    }))
 }
 
-pub fn write_cursor(path: &Path, next_block: u64) -> Result<()> {
+pub fn write_cursor(path: &Path, next_block: u64, binding: &str) -> Result<()> {
     use std::io::Write;
     let tmp = path.with_extension("cursor.tmp");
     let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(next_block.to_string().as_bytes())?;
+    f.write_all(format!("{next_block}\n{binding}\n").as_bytes())?;
     f.sync_all()?;
     std::fs::rename(&tmp, path)?;
     Ok(())

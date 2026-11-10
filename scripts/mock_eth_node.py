@@ -7,6 +7,7 @@ block divisible by 10. Behaviour is controlled by files in STATE_DIR, read on
 every request, so you can change it while the watcher runs:
 
   head      chain head block number (default 1000)
+  chainid   chain id (default 1)
   maxspan   reject eth_getLogs spans of this many blocks or more
   reject    "1" rejects every eth_getLogs call
   big       "1" makes event data 80000 bytes
@@ -29,6 +30,7 @@ class H(BaseHTTPRequestHandler):
         req=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         m,p=req['method'],req['params']; err=None; res=None
         if m=='eth_blockNumber': res=hex(int(rd('head','1000')))
+        elif m=='eth_chainId': res=hex(int(rd('chainid','1')))
         elif m=='eth_getLogs':
             open(os.path.join(STATE,'lastfilter.json'),'w').write(json.dumps(p[0]))
             f=int(p[0]['fromBlock'],16); t=int(p[0]['toBlock'],16)
