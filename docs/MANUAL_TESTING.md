@@ -95,3 +95,37 @@ max_block_range = 100
 | stop the daemon | error reaching the query server; cursor unchanged |
 | `cat /tmp/lh-state/lastfilter.json` | the address list and, with `topics` set, `"topics": [[...]]` |
 | `loghaven trace 0x…03de --app ethereum` | the event for block 990 (`%064x` of 990) |
+
+### `watch solana` against the fake node
+
+```bash
+mkdir /tmp/lh-sol-state && echo 100 > /tmp/lh-sol-state/tip
+python3 scripts/mock_sol_node.py /tmp/lh-sol-state &
+```
+
+Add to `config.toml` (and set `enabled = ["solana"]` in the existing `[chains]`):
+
+```toml
+[chains.solana]
+rpc_url = "http://127.0.0.1:18899/SECRETKEY"
+addresses = ["So11111111111111111111111111111111111111112"]
+max_signatures = 30
+```
+
+Transactions `1..tip` touch the address; every 7th failed. A signature is 64 `S`
+followed by the number, digits written as `a`..`j` (transaction 105 is `S…Sbaf`).
+
+| Try | Expect |
+|-----|--------|
+| `loghaven watch solana --once` | nothing recorded; `solana.cursor` holds the tip (`…baa`) |
+| `echo 110 > /tmp/lh-sol-state/tip`, run again | `Recorded 10 event(s)` |
+| the same again | nothing new; cursor unchanged |
+| `echo 200 > /tmp/lh-sol-state/tip`, run again | three batches of 30, then caught up |
+| `loghaven trace S…Sbaf --app solana` | one `error` record, `failed` in the message |
+| the same with the signature in lower case | 0 records (case sensitive) |
+| `echo 1 > /tmp/lh-sol-state/fail` | error `rpc getTransaction error`; cursor unchanged |
+| `echo 1 > /tmp/lh-sol-state/nulltx` | recorded with `logs_available: false` |
+| `echo 1 > /tmp/lh-sol-state/big` | recorded, `logs_truncated: true` |
+| `echo AAAA… > /tmp/lh-sol-state/genesis` | error: cursor was saved for another cluster; exit code 1 |
+| stop the mock node | error without the RPC URL |
+| stop the daemon | error reaching the query server; cursor unchanged |

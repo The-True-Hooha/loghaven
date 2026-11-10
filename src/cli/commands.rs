@@ -586,6 +586,30 @@ pub fn watch_ethereum(once: bool, profile: Option<&str>) -> Result<()> {
     ))
 }
 
+pub fn watch_solana(once: bool, profile: Option<&str>) -> Result<()> {
+    use crate::chain::{solana::SolanaWatcher, watch};
+
+    let config_path = config::get_config_path(profile);
+    let cfg = Config::load(&config_path)?;
+    let sol = cfg.chains.solana.clone().ok_or_else(|| {
+        crate::error::LogHavenError::Config(
+            "no [chains.solana] section in the config; see docs/CONFIGURATION.md".into(),
+        )
+    })?;
+    config::validate_solana(&sol)?;
+    let cursor_path = config_path.with_file_name("solana.cursor");
+    let mut watcher = SolanaWatcher::new(sol)?;
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(watch::run(
+        &mut watcher,
+        &cfg,
+        &cursor_path,
+        once,
+        SESSION_TTL_SECS,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn poll_page(
     port: u16,

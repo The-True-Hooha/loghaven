@@ -93,3 +93,15 @@ pub fn ethereum_confirmations() -> u64 {
 pub fn ethereum_max_block_range() -> u64 {
     1000
 }
+
+pub fn solana_app() -> String {
+    "solana".to_string()
+}
+
+pub fn solana_poll_interval_secs() -> u64 {
+    5
+}
+
+pub fn solana_max_signatures() -> u64 {
+    100
+}

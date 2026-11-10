@@ -11,7 +11,7 @@
 
 A local-first, composable, chain-aware observability runtime for on-chain and off-chain systems.
 
-> **Status: pre-1.0.** Phases 0 (foundation) and 1 (usable end to end) are done, and Phase 2 (chain awareness) has started: transaction tracing and an Ethereum adapter are in v0.2. Solana and Stellar adapters, the TUI and the dashboard are not built yet. See the [roadmap](#roadmap).
+> **Status: pre-1.0.** Phases 0 (foundation) and 1 (usable end to end) are done, and Phase 2 (chain awareness) has started: transaction tracing and an Ethereum adapter are in v0.2, and a Solana adapter is in the next release. The Stellar adapter, the TUI and the dashboard are not built yet. See the [roadmap](#roadmap).
 
 ## What it is
 
@@ -120,6 +120,7 @@ Every command accepts `--profile <NAME>` to use `<NAME>.toml` instead of `config
 | `loghaven auth token <APP> [--ttl-secs N]` | Print a signed JWT for an app (default 3600 s, max 30 days). |
 | `loghaven send <APP> <MESSAGE> [options]` | Send records. Options: `--level` (default `info`), `--source` (default `cli`), `--count`, `--chain`, `--tx-hash`, `--trace-id`. |
 | `loghaven watch ethereum [--once]` | Poll Ethereum contract logs and record them as logs (settings in `[chains.ethereum]`, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#chainsethereum)). |
+| `loghaven watch solana [--once]` | Poll finalized Solana transactions for configured addresses and record them as logs (settings in `[chains.solana]`, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#chainssolana)). |
 | `loghaven trace <TX_HASH> --app <APP> [--app <APP>...]` | Show the records that carry one transaction hash, oldest first, merged across the apps you name. Options: `--from MS`, `--to MS`, `--limit` (default 1000: newest N per app and overall), `--token` (one app only). `0x`+hex hashes match ignoring case (they are stored lowercase in chunks written after v0.2.0); other chains match exactly. |
 | `loghaven logs <APP> [options]` | Query records. Options: `--level`, `--source`, `--from MS`, `--to MS`, `--text`, `--limit` (default 100), `--token`, `--follow`. |
 
@@ -240,7 +241,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 |-------|-------|--------|
 | 0 - Foundation | Daemon, local storage, ingest, query API, auth, cloud sync | **Done** (v0.1) |
 | 1 - Usable end to end | Token CLI, client SDK, `send`, `logs --follow`, wire spec | **Done** (v0.2, see [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md)) |
-| 2 - Chain awareness | tx-hash correlation (`trace`), Ethereum adapter | **In progress**: `trace` and the Ethereum adapter shipped in v0.2; Solana, Stellar and WebSocket next |
+| 2 - Chain awareness | tx-hash correlation (`trace`), Ethereum adapter | **In progress**: `trace` and the Ethereum adapter shipped in v0.2; the Solana adapter is built; Stellar and WebSocket next |
 | 3 - Interfaces | TUI, dashboard | Planned |
 | 4 - Production hardening | Client-side encryption, multi-backend, persistent sessions, license | Planned |
 
@@ -266,7 +267,8 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 
 - Done: `GET /logs?tx_hash=` and `loghaven trace <tx> --app ...` correlate records by transaction hash across apps. Chunks written after v0.2.0 carry a bloom filter on `tx_hash`, so a trace skips chunks that cannot contain the hash. Older chunks are still scanned in full, and `--from`/`--to` narrow the scan for both.
 - Done: Ethereum adapter (`loghaven watch ethereum`): HTTP polling of `eth_getLogs` for configured contracts, confirmation depth, persisted cursor, normalized records. WebSocket subscriptions are not built yet.
-- Solana and Stellar adapters behind the same interface
+- Done: Solana adapter (`loghaven watch solana`): HTTP polling of finalized transactions for configured addresses, program logs, persisted per-address cursor. It shares the RPC client and watch loop with the Ethereum adapter. Not tested against a public cluster yet.
+- Stellar adapter on the same shared pieces
 
 ### Phase 3 - Interfaces
 
