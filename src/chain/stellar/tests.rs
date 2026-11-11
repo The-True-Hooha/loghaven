@@ -22,6 +22,8 @@ struct Mock {
     max_page: usize,
     latest_ledger: u64,
     unordered: bool,
+    /// Operation requests beyond this many answer HTTP 429.
+    rate_limit_ops_after: std::cell::Cell<usize>,
     calls: RefCell<Vec<String>>,
 }
 
@@ -35,6 +37,7 @@ impl Mock {
             max_page: usize::MAX,
             latest_ledger: u64::MAX,
             unordered: false,
+            rate_limit_ops_after: std::cell::Cell::new(usize::MAX),
             calls: RefCell::new(vec![]),
         }
     }
@@ -91,6 +94,18 @@ impl Get for Mock {
                 "history_latest_ledger": self.latest_ledger,
             })));
         }
+        if let Some(rest) = path.strip_prefix("/transactions/") {
+            if self.count("/operations") > self.rate_limit_ops_after.get() {
+                return Err(LogHavenError::RateLimited(
+                    "GET /transactions failed: HTTP 429 Too Many Requests".into(),
+                ));
+            }
+            let n = u64::from_str_radix(rest.split('/').next().unwrap(), 16).unwrap();
+            let ops: Vec<Value> = (0..2)
+                .map(|i| json!({"type": if i == 0 { "payment" } else { "manage_data" }, "n": n}))
+                .collect();
+            return Ok(Some(json!({"_embedded": {"records": ops}})));
+        }
         let account = path
             .strip_prefix("/accounts/")
             .unwrap()
@@ -131,6 +146,8 @@ fn cfg() -> StellarConfig {
         accounts: vec![A.into()],
         poll_interval_secs: 5,
         max_records: 100,
+        backfill: 0,
+        operations: false,
     }
 }
 
@@ -165,6 +182,93 @@ fn first_run_starts_at_the_newest_transaction_and_records_nothing() {
     let b = block_on(poll(&rpc, &cfg(), None)).unwrap();
     assert!(b.records.is_empty());
     assert_eq!(b.last[A], token(50));
+}
+
+#[test]
+fn a_first_run_with_backfill_starts_just_before_the_newest_transactions() {
+    let rpc = Mock::new().with(A, 1..=50);
+    let c = StellarConfig {
+        backfill: 3,
+        ..cfg()
+    };
+    let first = block_on(poll(&rpc, &c, None)).unwrap();
+    assert!(first.records.is_empty());
+    assert_eq!(first.last[A], token(47));
+    let saved = Cursor {
+        binding: "b".into(),
+        last: first.last,
+    };
+    let next = block_on(poll(&rpc, &c, Some(&saved))).unwrap();
+    assert_eq!(hashes(&next), [hash(48), hash(49), hash(50)]);
+}
+
+#[test]
+fn a_backfill_longer_than_the_history_reads_all_of_it() {
+    let rpc = Mock::new().with(A, 1..=3);
+    let c = StellarConfig {
+        backfill: 5,
+        ..cfg()
+    };
+    let first = block_on(poll(&rpc, &c, None)).unwrap();
+    assert!(first.last.is_empty());
+    let saved = Cursor {
+        binding: "b".into(),
+        last: first.last,
+    };
+    let next = block_on(poll(&rpc, &c, Some(&saved))).unwrap();
+    assert_eq!(hashes(&next), [hash(1), hash(2), hash(3)]);
+}
+
+#[test]
+fn operation_types_are_recorded_only_when_asked_for() {
+    let rpc = Mock::new().with(A, 1..=3);
+    let cur = Cursor {
+        binding: "b".into(),
+        last: BTreeMap::from([(A.to_string(), token(1))]),
+    };
+    let off = block_on(poll(&rpc, &cfg(), Some(&cur))).unwrap();
+    assert_eq!(rpc.count("/operations"), 0);
+    assert!(off.records[0].metadata.as_ref().unwrap()["operations"].is_null());
+
+    let on = StellarConfig {
+        operations: true,
+        ..cfg()
+    };
+    let b = block_on(poll(&rpc, &on, Some(&cur))).unwrap();
+    assert_eq!(rpc.count("/operations"), 2);
+    assert_eq!(
+        b.records[0].metadata.as_ref().unwrap()["operations"],
+        json!(["payment", "manage_data"])
+    );
+}
+
+#[test]
+fn a_rate_limited_operation_read_keeps_what_was_read_and_resumes_after_it() {
+    let rpc = Mock::new().with(A, 1..=6);
+    rpc.rate_limit_ops_after.set(2);
+    let on = StellarConfig {
+        operations: true,
+        ..cfg()
+    };
+    let cur = Cursor {
+        binding: "b".into(),
+        last: BTreeMap::from([(A.to_string(), token(0))]),
+    };
+    let b = block_on(poll(&rpc, &on, Some(&cur))).unwrap();
+    assert_eq!(hashes(&b), [hash(1), hash(2)]);
+    assert_eq!(b.last[A], token(2));
+    assert!(!b.more);
+
+    rpc.rate_limit_ops_after.set(0);
+    let e = block_on(poll(
+        &rpc,
+        &on,
+        Some(&Cursor {
+            binding: "b".into(),
+            last: b.last,
+        }),
+    ));
+    assert!(matches!(e, Err(LogHavenError::RateLimited(_))));
 }
 
 #[test]
@@ -438,6 +542,8 @@ fn validation_rejects_bad_settings() {
     assert!(c(&|s| s.poll_interval_secs = 0));
     assert!(c(&|s| s.max_records = 0));
     assert!(c(&|s| s.max_records = 1_001));
+    assert!(c(&|s| s.backfill = 101));
+    assert!(!c(&|s| s.backfill = 100));
     assert!(c(&|s| s.app = "../x".into()));
 }
 

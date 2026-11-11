@@ -11,7 +11,7 @@
 
 A local-first, composable, chain-aware observability runtime for on-chain and off-chain systems.
 
-> **Status: pre-1.0.** Phases 0 (foundation), 1 (usable end to end), 2 (chain awareness) and 3 (interfaces) are done: transaction tracing and Ethereum, Solana and Stellar adapters are in v0.3. Phase 3 (interfaces) is done too: the terminal UI and the web dashboard are in v0.4. The adapters have been tested against local and fake nodes, not yet against public networks. See the [roadmap](#roadmap).
+> **Status: pre-1.0.** Phases 0 (foundation), 1 (usable end to end), 2 (chain awareness) and 3 (interfaces) are done: transaction tracing and Ethereum, Solana and Stellar adapters are in v0.3. Phase 3 (interfaces) is done too: the terminal UI and the web dashboard are in v0.4. The adapters have been run against public Ethereum, Solana and Stellar nodes over HTTP, and against local and fake nodes; `wss://` block notifications were run against a public Ethereum node. The dashboard was run in headless Chromium. See the [roadmap](#roadmap).
 
 ## What it is
 
@@ -274,7 +274,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 |-------|-------|--------|
 | 0 - Foundation | Daemon, local storage, ingest, query API, auth, cloud sync | **Done** (v0.1) |
 | 1 - Usable end to end | Token CLI, client SDK, `send`, `logs --follow`, wire spec | **Done** (v0.2, see [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md)) |
-| 2 - Chain awareness | tx-hash correlation (`trace`), Ethereum, Solana and Stellar adapters | **Done** (v0.3): `trace` and the Ethereum adapter shipped in v0.2; the Solana and Stellar adapters and Ethereum WebSocket block notifications in v0.3. Testing against public networks is still to do |
+| 2 - Chain awareness | tx-hash correlation (`trace`), Ethereum, Solana and Stellar adapters | **Done** (v0.3): `trace` and the Ethereum adapter shipped in v0.2; the Solana and Stellar adapters and Ethereum WebSocket block notifications in v0.3. Run against public networks since v0.4 |
 | 3 - Interfaces | TUI, web dashboard | **Done** (v0.4): `loghaven tui` and `loghaven dashboard` |
 | 4 - Production hardening | Client-side encryption, multi-backend, persistent sessions, license | Planned |
 
@@ -300,8 +300,8 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 
 - Done: `GET /logs?tx_hash=` and `loghaven trace <tx> --app ...` correlate records by transaction hash across apps. Chunks written after v0.2.0 carry a bloom filter on `tx_hash`, so a trace skips chunks that cannot contain the hash. Older chunks are still scanned in full, and `--from`/`--to` narrow the scan for both.
 - Done: Ethereum adapter (`loghaven watch ethereum`): HTTP polling of `eth_getLogs` for configured contracts, confirmation depth, persisted cursor, normalized records. An optional `ws_url` starts a poll as soon as a new block is announced.
-- Done: Solana adapter (`loghaven watch solana`): HTTP polling of finalized transactions for configured addresses, program logs, persisted per-address cursor. It shares the RPC client and watch loop with the Ethereum adapter. Not tested against a public cluster yet.
-- Done: Stellar adapter (`loghaven watch stellar`): pages account transactions from Horizon with a persisted per-account cursor. Not tested against a public Horizon server yet.
+- Done: Solana adapter (`loghaven watch solana`): HTTP polling of finalized transactions for configured addresses, program logs, persisted per-address cursor. It shares the RPC client and watch loop with the Ethereum adapter. Run against Solana mainnet's public RPC; `backfill` records the newest transactions on the first run.
+- Done: Stellar adapter (`loghaven watch stellar`): pages account transactions from Horizon with a persisted per-account cursor. Run against the public Horizon server; `backfill` records the newest transactions on the first run, and `operations = true` adds each transaction's operation types.
 
 ### Phase 3 - Interfaces
 
