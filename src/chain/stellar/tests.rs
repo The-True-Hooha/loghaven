@@ -131,6 +131,7 @@ fn cfg() -> StellarConfig {
         accounts: vec![A.into()],
         poll_interval_secs: 5,
         max_records: 100,
+        backfill: 0,
     }
 }
 
@@ -165,6 +166,41 @@ fn first_run_starts_at_the_newest_transaction_and_records_nothing() {
     let b = block_on(poll(&rpc, &cfg(), None)).unwrap();
     assert!(b.records.is_empty());
     assert_eq!(b.last[A], token(50));
+}
+
+#[test]
+fn a_first_run_with_backfill_starts_just_before_the_newest_transactions() {
+    let rpc = Mock::new().with(A, 1..=50);
+    let c = StellarConfig {
+        backfill: 3,
+        ..cfg()
+    };
+    let first = block_on(poll(&rpc, &c, None)).unwrap();
+    assert!(first.records.is_empty());
+    assert_eq!(first.last[A], token(47));
+    let saved = Cursor {
+        binding: "b".into(),
+        last: first.last,
+    };
+    let next = block_on(poll(&rpc, &c, Some(&saved))).unwrap();
+    assert_eq!(hashes(&next), [hash(48), hash(49), hash(50)]);
+}
+
+#[test]
+fn a_backfill_longer_than_the_history_reads_all_of_it() {
+    let rpc = Mock::new().with(A, 1..=3);
+    let c = StellarConfig {
+        backfill: 5,
+        ..cfg()
+    };
+    let first = block_on(poll(&rpc, &c, None)).unwrap();
+    assert!(first.last.is_empty());
+    let saved = Cursor {
+        binding: "b".into(),
+        last: first.last,
+    };
+    let next = block_on(poll(&rpc, &c, Some(&saved))).unwrap();
+    assert_eq!(hashes(&next), [hash(1), hash(2), hash(3)]);
 }
 
 #[test]
@@ -438,6 +474,8 @@ fn validation_rejects_bad_settings() {
     assert!(c(&|s| s.poll_interval_secs = 0));
     assert!(c(&|s| s.max_records = 0));
     assert!(c(&|s| s.max_records = 1_001));
+    assert!(c(&|s| s.backfill = 101));
+    assert!(!c(&|s| s.backfill = 100));
     assert!(c(&|s| s.app = "../x".into()));
 }
 

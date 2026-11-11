@@ -26,6 +26,10 @@ pub enum LogHavenError {
 
     #[error("Daemon error: {0}")]
     Daemon(String),
+
+    /// A node answered HTTP 429: it is working, only too busy for this many requests.
+    #[error("Daemon error: {0}")]
+    RateLimited(String),
 }
 
 pub type Result<T> = std::result::Result<T, LogHavenError>;

@@ -194,6 +194,9 @@ pub struct SolanaConfig {
     /// Most transactions recorded per address in one poll; a larger backlog takes several polls.
     #[serde(default = "defaults::solana_max_signatures")]
     pub max_signatures: u64,
+    /// On the first run, record this many of each address's newest transactions instead of starting at the tip.
+    #[serde(default)]
+    pub backfill: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,6 +213,9 @@ pub struct StellarConfig {
     /// Most transactions recorded per account in one poll; a larger backlog takes several polls.
     #[serde(default = "defaults::stellar_max_records")]
     pub max_records: u64,
+    /// On the first run, record this many of each account's newest transactions instead of starting at the tip.
+    #[serde(default)]
+    pub backfill: u64,
 }
 
 impl Default for AgentConfig {

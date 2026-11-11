@@ -121,13 +121,18 @@ async fn page_after(
     Ok(out)
 }
 
-async fn tip(get: &impl Get, account: &str) -> Result<Option<u64>> {
-    let path = format!("/accounts/{account}/transactions?order=desc&include_failed=true&limit=1");
+/// Where a first run starts: just before the `backfill` newest transactions, so they are
+/// recorded by the next poll. `None` when the account has no more than that (all of its
+/// history is wanted, or it has none), and an account without a token is read from its start.
+async fn start_token(get: &impl Get, account: &str, backfill: usize) -> Result<Option<u64>> {
+    let limit = backfill + 1;
+    let path =
+        format!("/accounts/{account}/transactions?order=desc&include_failed=true&limit={limit}");
     let Some(reply) = get.get(&path).await? else {
         return Ok(None);
     };
     reply
-        .pointer("/_embedded/records/0")
+        .pointer(&format!("/_embedded/records/{backfill}"))
         .map(|v| parse_tx(v).map(|t| t.token))
         .transpose()
 }
@@ -171,7 +176,7 @@ pub async fn poll(get: &impl Get, cfg: &StellarConfig, saved: Option<&Cursor>) -
     let mut last = BTreeMap::new();
     let Some(saved) = saved else {
         for account in accounts {
-            if let Some(t) = tip(get, account).await? {
+            if let Some(t) = start_token(get, account, cfg.backfill as usize).await? {
                 last.insert(account.clone(), t);
             }
         }

@@ -24,6 +24,8 @@ struct Mock {
     max_page: usize,
     finalized: u64,
     recent: bool,
+    /// `getTransaction` calls beyond this many answer HTTP 429.
+    rate_limit_after: std::cell::Cell<usize>,
     calls: RefCell<Vec<(String, Value)>>,
 }
 
@@ -37,6 +39,7 @@ impl Mock {
             max_page: usize::MAX,
             finalized: u64::MAX,
             recent: false,
+            rate_limit_after: std::cell::Cell::new(usize::MAX),
             calls: RefCell::new(vec![]),
         }
     }
@@ -120,11 +123,23 @@ impl Rpc for Mock {
                     .collect();
                 Ok(Value::Array(page))
             }
+            "getTransaction" if self.count("getTransaction") > self.rate_limit_after.get() => {
+                Err(LogHavenError::RateLimited(
+                    "rpc getTransaction failed: HTTP 429 Too Many Requests".into(),
+                ))
+            }
             "getTransaction" if self.fail_tx => Err(LogHavenError::Daemon(
                 "rpc getTransaction error: boom".into(),
             )),
             "getTransaction" => {
                 assert_eq!(params[1]["commitment"], "finalized");
+                // a real node answers -32015 for a version above the cap, and mainnet serves version 1
+                assert!(
+                    params[1]["maxSupportedTransactionVersion"]
+                        .as_u64()
+                        .is_some_and(|v| v >= 1),
+                    "{params}"
+                );
                 Ok(self
                     .txs
                     .get(&Self::number(params[0].as_str().unwrap()))
@@ -151,6 +166,7 @@ fn cfg() -> SolanaConfig {
         addresses: vec![ADDR.into()],
         poll_interval_secs: 5,
         max_signatures: 100,
+        backfill: 0,
     }
 }
 
@@ -186,6 +202,41 @@ fn first_run_starts_at_the_tip_and_records_nothing() {
     assert!(b.records.is_empty());
     assert_eq!(b.last[ADDR].signature, sig(50));
     assert_eq!(rpc.count("getTransaction"), 0);
+}
+
+#[test]
+fn a_first_run_with_backfill_starts_just_before_the_newest_transactions() {
+    let rpc = Mock::new().with(ADDR, 1..=50);
+    let c = SolanaConfig {
+        backfill: 3,
+        ..cfg()
+    };
+    let first = block_on(poll(&rpc, &c, None)).unwrap();
+    assert!(first.records.is_empty());
+    assert_eq!(first.last[ADDR].signature, sig(47));
+    let saved = Cursor {
+        binding: "b".into(),
+        last: first.last,
+    };
+    let next = block_on(poll(&rpc, &c, Some(&saved))).unwrap();
+    assert_eq!(hashes(&next), [sig(48), sig(49), sig(50)]);
+}
+
+#[test]
+fn a_backfill_longer_than_the_history_reads_all_of_it() {
+    let rpc = Mock::new().with(ADDR, 1..=3);
+    let c = SolanaConfig {
+        backfill: 5,
+        ..cfg()
+    };
+    let first = block_on(poll(&rpc, &c, None)).unwrap();
+    assert!(first.last.is_empty());
+    let saved = Cursor {
+        binding: "b".into(),
+        last: first.last,
+    };
+    let next = block_on(poll(&rpc, &c, Some(&saved))).unwrap();
+    assert_eq!(hashes(&next), [sig(1), sig(2), sig(3)]);
 }
 
 #[test]
@@ -312,6 +363,48 @@ fn a_pruned_transaction_is_still_recorded_without_logs() {
     let m = b.records[0].metadata.as_ref().unwrap();
     assert_eq!(m["logs_available"], false);
     assert_eq!(m["logs"], json!([]));
+}
+
+#[test]
+fn a_rate_limited_poll_keeps_what_it_read_and_resumes_after_the_last_recorded_transaction() {
+    let rpc = Mock::new().with(ADDR, 1..=10);
+    rpc.rate_limit_after.set(4);
+    let b = block_on(poll(&rpc, &cfg(), Some(&cursor_at(ADDR, 0)))).unwrap();
+    assert_eq!(hashes(&b), [sig(1), sig(2), sig(3), sig(4)]);
+    assert_eq!(b.last[ADDR].signature, sig(4));
+    assert!(
+        !b.more,
+        "a busy node is given the poll interval, not another request at once"
+    );
+
+    rpc.rate_limit_after.set(usize::MAX);
+    let saved = Cursor {
+        binding: "b".into(),
+        last: b.last,
+    };
+    let next = block_on(poll(&rpc, &cfg(), Some(&saved))).unwrap();
+    assert_eq!(hashes(&next).len(), 6);
+    assert_eq!(hashes(&next)[0], sig(5));
+}
+
+#[test]
+fn rate_limits_never_use_up_a_transactions_attempts() {
+    let rpc = Mock::new()
+        .with(ADDR, 1..=1)
+        .with_tx(1, vec!["Program log: hi"]);
+    let mut mem = Memory::default();
+    let cur = cursor_at(ADDR, 0);
+    rpc.rate_limit_after.set(0);
+    for _ in 0..(MAX_TX_ATTEMPTS + 2) {
+        let e = block_on(poll_with(&rpc, &cfg(), Some(&cur), &mut mem))
+            .err()
+            .unwrap();
+        assert!(matches!(e, LogHavenError::RateLimited(_)), "{e}");
+    }
+    rpc.rate_limit_after.set(usize::MAX);
+    let b = block_on(poll_with(&rpc, &cfg(), Some(&cur), &mut mem)).unwrap();
+    let m = b.records[0].metadata.as_ref().unwrap();
+    assert_eq!(m["logs_available"], true);
 }
 
 #[test]
@@ -492,6 +585,8 @@ fn validation_rejects_bad_settings() {
     assert!(c(&|s| s.poll_interval_secs = 0));
     assert!(c(&|s| s.max_signatures = 0));
     assert!(c(&|s| s.max_signatures = 1_001));
+    assert!(c(&|s| s.backfill = 101));
+    assert!(!c(&|s| s.backfill = 100));
     assert!(c(&|s| s.app = "../x".into()));
 }
 
