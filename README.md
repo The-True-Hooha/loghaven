@@ -218,7 +218,7 @@ Three overrides are applied on top of the file: `LOGHAVEN_STORAGE_BACKEND`, `LOG
 - Everything listens on loopback only. Do not forward these ports to a network.
 - With `require_auth = true` (default) every datagram is HMAC-signed with a per-session key and carries a counter, so captured datagrams cannot be replayed. A session belongs to one app and cannot write or read another app's data.
 - `keys/private.pem` is created with mode `0600` in a `0700` directory. Whoever can read it can mint a token for any app, and `send`, `auth token` and `logs` (without `--token`) read it. Treat it like a password.
-- Sessions live in memory. Restarting the daemon invalidates them; re-run the client or `loghaven send`.
+- Sessions are saved to `sessions.json` in `keys_dir` (mode 0600, the file holds the sessions' HMAC keys), so a restart keeps them: open dashboards, `tui` and `logs --follow` carry on, and clients keep sending. Changes are written once a second and on a clean shutdown. After a crash or `kill -9`, a datagram sent in the last second before it can be accepted a second time. A damaged `sessions.json` stops the daemon with a message; delete it to start without sessions.
 - After `auth keygen --force`, restart the daemon so it loads the new public key.
 
 ## Troubleshooting
@@ -312,7 +312,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 
 - Client-side encryption
 - Multiple simultaneous storage backends (`primary` / `secondary`)
-- Persistent sessions across restarts
+- Done: persistent sessions across restarts
 - Column projection in queries, dedicated writer threads
 - Choose and publish a license
 

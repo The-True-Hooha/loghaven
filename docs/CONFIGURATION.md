@@ -35,7 +35,7 @@ on any command to read `NAME.toml` instead of `config.toml`.
 | Key | Default | Notes |
 |-----|---------|-------|
 | `keys_dir` | `<config dir>/keys` | Holds `private.pem` (0600) and `public.pem`. |
-| `session_ttl_secs` | `3600` | Maximum session lifetime. A session never outlives the JWT that created it. |
+| `session_ttl_secs` | `3600` | Maximum session lifetime. A session never outlives the JWT that created it. Sessions are kept in `<keys_dir>/sessions.json` and survive a daemon restart. |
 | `query_port` | `9200` | HTTP port for `POST /auth` and `GET /logs` (`127.0.0.1`). |
 | `require_auth` | `true` | `false` makes ingest accept unsigned datagrams and the query API skip tokens. Development only: any local process can then read and write any app. |
 
