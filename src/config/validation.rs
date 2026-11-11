@@ -1,6 +1,9 @@
 use super::Config;
 use crate::error::{LogHavenError, Result};
 
+/// One listing request must hold the backfill plus the transaction the cursor sits on.
+const MAX_BACKFILL: u64 = 100;
+
 pub fn validate(config: &Config) -> Result<()> {
     match config.storage.backend.as_str() {
         "auto" => {}
@@ -171,6 +174,9 @@ pub fn validate_solana(sol: &super::SolanaConfig) -> Result<()> {
     if !(1..=1_000).contains(&sol.max_signatures) {
         return bad("max_signatures must be between 1 and 1000".into());
     }
+    if sol.backfill > MAX_BACKFILL {
+        return bad(format!("backfill must be at most {MAX_BACKFILL}"));
+    }
     Ok(())
 }
 
@@ -202,6 +208,9 @@ pub fn validate_stellar(xlm: &super::StellarConfig) -> Result<()> {
     }
     if !(1..=1_000).contains(&xlm.max_records) {
         return bad("max_records must be between 1 and 1000".into());
+    }
+    if xlm.backfill > MAX_BACKFILL {
+        return bad(format!("backfill must be at most {MAX_BACKFILL}"));
     }
     Ok(())
 }

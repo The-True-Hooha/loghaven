@@ -43,6 +43,15 @@ async fn body_json(mut resp: reqwest::Response, what: &str) -> Result<Value> {
         .map_err(|_| LogHavenError::Daemon(format!("{what}: reply is not JSON")))
 }
 
+fn http_failure(what: &str, status: reqwest::StatusCode) -> LogHavenError {
+    let msg = format!("{what} failed: HTTP {status}");
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        LogHavenError::RateLimited(msg)
+    } else {
+        LogHavenError::Daemon(msg)
+    }
+}
+
 pub trait Rpc {
     async fn call(&self, method: &str, params: Value) -> Result<Value>;
 }
@@ -75,9 +84,7 @@ impl Rpc for HttpRpc {
             .map_err(|e| LogHavenError::Daemon(format!("{what} failed: {}", e.without_url())))?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(LogHavenError::Daemon(format!(
-                "{what} failed: HTTP {status}"
-            )));
+            return Err(http_failure(&what, status));
         }
         let mut reply = body_json(resp, &what).await?;
         if let Some(err) = reply.get("error") {
@@ -132,9 +139,7 @@ impl Get for HttpGet {
             return Ok(None);
         }
         if !status.is_success() {
-            return Err(LogHavenError::Daemon(format!(
-                "{what} failed: HTTP {status}"
-            )));
+            return Err(http_failure(&what, status));
         }
         body_json(resp, &what).await.map(Some)
     }
@@ -217,6 +222,25 @@ mod tests {
         let rpc = HttpRpc::new(&serve(app).await).unwrap();
         let e = rpc.call("m", json!([])).await.unwrap_err().to_string();
         assert!(!e.contains('\u{1b}') && e.len() < 400, "{}", e.len());
+    }
+
+    #[tokio::test]
+    async fn http_429_is_a_rate_limit_not_a_failure() {
+        use axum::routing::get;
+        let app = Router::new()
+            .route(
+                "/secret-key",
+                post(|| async { axum::http::StatusCode::TOO_MANY_REQUESTS }),
+            )
+            .route(
+                "/secret-key/x",
+                get(|| async { axum::http::StatusCode::TOO_MANY_REQUESTS }),
+            );
+        let base = serve(app).await;
+        let e = HttpRpc::new(&base).unwrap().call("m", json!([])).await;
+        assert!(matches!(e, Err(LogHavenError::RateLimited(_))), "{e:?}");
+        let e = HttpGet::new(&base).unwrap().get("/x").await;
+        assert!(matches!(e, Err(LogHavenError::RateLimited(_))), "{e:?}");
     }
 
     #[tokio::test]
