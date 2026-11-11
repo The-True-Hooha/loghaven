@@ -11,7 +11,7 @@
 
 A local-first, composable, chain-aware observability runtime for on-chain and off-chain systems.
 
-> **Status: pre-1.0.** Phases 0 (foundation), 1 (usable end to end) and 2 (chain awareness) are done: transaction tracing and Ethereum, Solana and Stellar adapters are in v0.3. The adapters have been tested against local and fake nodes, not yet against public networks. The TUI and the dashboard are not built yet. See the [roadmap](#roadmap).
+> **Status: pre-1.0.** Phases 0 (foundation), 1 (usable end to end), 2 (chain awareness) and 3 (interfaces) are done: transaction tracing and Ethereum, Solana and Stellar adapters are in v0.3. Phase 3 (interfaces) is done too: the terminal UI and the web dashboard are in v0.4. The adapters have been tested against local and fake nodes, not yet against public networks. See the [roadmap](#roadmap).
 
 ## What it is
 
@@ -275,7 +275,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 | 0 - Foundation | Daemon, local storage, ingest, query API, auth, cloud sync | **Done** (v0.1) |
 | 1 - Usable end to end | Token CLI, client SDK, `send`, `logs --follow`, wire spec | **Done** (v0.2, see [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md)) |
 | 2 - Chain awareness | tx-hash correlation (`trace`), Ethereum, Solana and Stellar adapters | **Done** (v0.3): `trace` and the Ethereum adapter shipped in v0.2; the Solana and Stellar adapters and Ethereum WebSocket block notifications in v0.3. Testing against public networks is still to do |
-| 3 - Interfaces | TUI, dashboard | Planned |
+| 3 - Interfaces | TUI, web dashboard | **Done** (v0.4): `loghaven tui` and `loghaven dashboard` |
 | 4 - Production hardening | Client-side encryption, multi-backend, persistent sessions, license | Planned |
 
 ### Phase 0 - Foundation (done)
