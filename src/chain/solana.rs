@@ -136,6 +136,10 @@ async fn backlog(
     Ok((out, skipped))
 }
 
+/// The node refuses a transaction newer than this with error -32015; mainnet already serves
+/// version 1, so a low cap would turn every such transaction into a retried failure.
+const MAX_TX_VERSION: u8 = u8::MAX;
+
 async fn transaction(rpc: &impl Rpc, signature: &str) -> Result<Option<Value>> {
     let tx = rpc
         .call(
@@ -143,7 +147,7 @@ async fn transaction(rpc: &impl Rpc, signature: &str) -> Result<Option<Value>> {
             json!([signature, {
                 "encoding": "json",
                 "commitment": "finalized",
-                "maxSupportedTransactionVersion": 0,
+                "maxSupportedTransactionVersion": MAX_TX_VERSION,
             }]),
         )
         .await?;
@@ -226,6 +230,8 @@ async fn fetch(
             "rpc does not have transaction {} yet; retrying",
             info.signature
         )),
+        // a busy node says nothing about this transaction, so it does not use up an attempt
+        Err(e @ LogHavenError::RateLimited(_)) => return Err(e),
         Err(e) => e,
     };
     if mem.failures.len() > MAX_BACKLOG {
@@ -322,8 +328,22 @@ pub struct Batch {
     pub more: bool,
 }
 
+/// Where a first run starts: just before the `backfill` newest transactions, so they are
+/// recorded by the next poll. `None` when the address has no more than that (all of its
+/// history is wanted, or it has none), and an address without a mark is read from its start.
+async fn start_mark(rpc: &impl Rpc, address: &str, backfill: usize) -> Result<Option<Mark>> {
+    let mut newest = signatures(rpc, address, None, None, backfill + 1).await?;
+    Ok((newest.len() > backfill).then(|| {
+        let at = newest.swap_remove(backfill);
+        Mark {
+            signature: at.signature,
+            slot: at.slot,
+        }
+    }))
+}
+
 /// Reads the next transactions after `saved`. The caller owns the cursor.
-/// Without a cursor it starts at the current tip and records nothing.
+/// Without a cursor it starts `cfg.backfill` transactions before the current tip and records nothing.
 pub async fn poll(rpc: &impl Rpc, cfg: &SolanaConfig, saved: Option<&Cursor>) -> Result<Batch> {
     poll_with(rpc, cfg, saved, &mut Memory::default()).await
 }
@@ -339,14 +359,8 @@ pub async fn poll_with(
     let mut last = BTreeMap::new();
     let Some(saved) = saved else {
         for address in addresses {
-            if let Some(tip) = signatures(rpc, address, None, None, 1).await?.pop() {
-                last.insert(
-                    address.clone(),
-                    Mark {
-                        signature: tip.signature,
-                        slot: tip.slot,
-                    },
-                );
+            if let Some(start) = start_mark(rpc, address, cfg.backfill as usize).await? {
+                last.insert(address.clone(), start);
             }
         }
         return Ok(Batch {
@@ -380,17 +394,37 @@ pub async fn poll_with(
 
     let mut seen = BTreeSet::new();
     let mut more = false;
+    let mut throttled = None;
     for ((address, until, pending), count) in listed.iter().zip(counts) {
-        more |= count < pending.len();
         let take = &pending[..count];
-        for info in take {
-            // a transaction touching several watched addresses is recorded once
-            if seen.insert(info.signature.clone()) {
-                let (tx, logs_error) = fetch(rpc, info, mem).await?;
-                records.push(to_record(address, info, tx.as_ref(), logs_error.as_deref()));
+        let mut done = 0;
+        if throttled.is_none() {
+            for info in take {
+                // a transaction touching several watched addresses is recorded once
+                if seen.insert(info.signature.clone()) {
+                    match fetch(rpc, info, mem).await {
+                        Ok((tx, logs_error)) => {
+                            records.push(to_record(
+                                address,
+                                info,
+                                tx.as_ref(),
+                                logs_error.as_deref(),
+                            ));
+                        }
+                        Err(e @ LogHavenError::RateLimited(_)) => {
+                            seen.remove(&info.signature);
+                            throttled = Some(e);
+                            break;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                done += 1;
             }
         }
-        let newest = take
+        // after a rate limit the rest waits for the next poll, which starts after the interval
+        more |= throttled.is_none() && count < pending.len();
+        let newest = take[..done]
             .last()
             .map(|i| Mark {
                 signature: i.signature.clone(),
@@ -400,6 +434,11 @@ pub async fn poll_with(
         if let Some(newest) = newest {
             last.insert((*address).clone(), newest);
         }
+    }
+    if let Some(e) = throttled
+        && records.is_empty()
+    {
+        return Err(e);
     }
     Ok(Batch {
         records,

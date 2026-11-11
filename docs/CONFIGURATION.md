@@ -181,8 +181,9 @@ How it behaves:
   subscription with "method not found" is not asked again until the watcher
   restarts; any other refusal (a rate limit) is retried. The socket is read only
   while waiting, so a node that drops quiet clients can cause a reconnect each
-  cycle. Messages over 1 MiB are refused. The URL is never printed in errors. `wss://` uses the built-in root certificates; it has not been tried
-  against a public node.
+  cycle. Messages over 1 MiB are refused. The URL is never printed in errors. `wss://` uses the built-in root certificates and has been run against a public
+  node (`wss://ethereum-rpc.publicnode.com`): with a 60 second `poll_interval_secs`, polls
+  followed the 12 second block time.
 - If your node rejects a range because it holds too many logs, lower
   `max_block_range`.
 - The RPC URL is never printed in errors, because it often contains an API key.
@@ -200,6 +201,7 @@ app = "solana"                  # app the transactions are recorded under (defau
 addresses = ["..."]             # account or program addresses (base58); at least one
 poll_interval_secs = 5          # wait between polls once caught up
 max_signatures = 100            # most transactions per address in one poll (1 to 1000)
+# backfill = 20                 # first run only: also record each address's newest 20 transactions (0 to 100)
 ```
 
 Run it with `loghaven watch solana` (the daemon must be running). It is a
@@ -217,7 +219,9 @@ How it behaves:
 - Only finalized transactions are read, so there is no reorg window and no
   `confirmations` setting.
 - The first run starts at the current tip and records nothing from before.
-  There is no way to replay older history yet.
+  With `backfill = N` it starts N transactions before the tip, so each address's
+  newest N transactions are recorded first (at most `max_signatures` per poll). `backfill`
+  is read only when there is no cursor; it is not part of what the cursor is bound to.
 - The newest recorded signature per address is kept in `solana.cursor` next to
   `config.toml`: the first line is a fingerprint of the cluster and the address
   list, then one `<address> <signature> <slot>` line per address. An address with
@@ -263,6 +267,11 @@ How it behaves:
 - The node must support `getSignaturesForAddress`, `getTransaction` and
   `getGenesisHash`. Public nodes limit how much history they keep and how fast
   you may call them: one `getTransaction` call is made per recorded transaction.
+  A reply of HTTP 429 is not counted as a failed attempt: what was already read in
+  that poll is recorded, the cursor moves only that far, and the rest waits for the
+  next poll after `poll_interval_secs`. Transactions of every version the node
+  serves are read (mainnet already serves version 1). If a busy address produces more
+  transactions than the node lets you read, lower `max_signatures` or use a paid node.
 - `ws_url` is accepted but unused; the adapter polls over HTTP.
 - The RPC URL is never printed in errors, because it often contains an API key.
   It is stored in plain text in `config.toml`.
@@ -279,6 +288,8 @@ app = "stellar"                 # app the transactions are recorded under (defau
 accounts = ["G..."]             # account ids to watch (G + 55 characters); at least one
 poll_interval_secs = 5          # wait between polls once caught up
 max_records = 100               # most transactions per account in one poll (1 to 1000)
+# backfill = 20                 # first run only: also record each account's newest 20 transactions (0 to 100)
+# operations = true             # also record each transaction's operation types (one more request each)
 ```
 
 Run it with `loghaven watch stellar` (the daemon must be running). It is a
@@ -297,7 +308,14 @@ How it behaves:
 - Horizon only serves closed ledgers, which are final, so there is no reorg window
   and no `confirmations` setting.
 - The first run starts at each account's newest transaction and records nothing
-  from before. There is no way to replay older history yet.
+  from before. With `backfill = N` it starts N transactions earlier, so each account's
+  newest N transactions are recorded first (at most `max_records` per poll). `backfill`
+  is read only when there is no cursor.
+- With `operations = true`, each record's `metadata.operations` lists the operation types
+  in order (for example `["payment", "manage_data"]`); it is `null` when the setting is off.
+  This costs one more request per recorded transaction. A reply of HTTP 429 is handled as
+  for Solana: what was read is recorded, the cursor moves only that far, the rest waits for
+  the next poll.
 - The Horizon `paging_token` of the newest recorded transaction per account is
   kept in `stellar.cursor` next to `config.toml`: the first line is a fingerprint of
   the network passphrase and the account list, then one `<account> <token>` line

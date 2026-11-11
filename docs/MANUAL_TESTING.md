@@ -236,3 +236,5 @@ loghaven dashboard --app web
 | `loghaven dashboard --app web --ttl-secs 5`, wait | the page shows the expired-session message and stops polling |
 | `curl -H 'Host: evil.example' localhost:9200/dashboard` (also `/logs?app=web`) | `403` |
 | `loghaven dashboard --app Bad/App` | error: invalid app name, no browser |
+
+Scripted version, in a real browser engine: `node scripts/dashboard_e2e.js "$(loghaven dashboard --app web --no-open)"` runs the table above in headless Chromium (see the header of the script for the seed records and `playwright` setup). It also checks the Content-Security-Policy, that no token is left in the address bar, storage or a Referer header, the phone-width layout and the dark theme.
