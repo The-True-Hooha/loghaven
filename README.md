@@ -311,7 +311,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 ### Phase 4 - Production hardening
 
 - Client-side encryption
-- Multiple simultaneous storage backends (`primary` / `secondary`)
+- Done: multiple simultaneous storage backends (`secondary` store, uploaded alongside the main one)
 - Done: persistent sessions across restarts
 - Column projection in queries, dedicated writer threads
 - Choose and publish a license

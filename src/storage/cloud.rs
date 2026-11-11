@@ -45,13 +45,87 @@ impl ObjectStore for S3Store {
     }
 }
 
-/// Uploads finished chunks and remembers which ones are done.
-///
-/// A chunk `X.parquet` is synced once `X.parquet.synced` exists next to it, or
-/// once it was deleted after upload. Anything else is retried on the next run.
-pub struct CloudSyncer {
+/// One upload destination.
+pub struct Target {
+    /// Names the target's partial marker while several targets are in use.
+    label: String,
     store: Box<dyn ObjectStore>,
     prefix: String,
+}
+
+impl Target {
+    pub fn new(label: &str, store: Box<dyn ObjectStore>, prefix: Option<String>) -> Self {
+        Self {
+            label: label.to_string(),
+            store,
+            prefix: prefix.unwrap_or_default().trim_matches('/').to_string(),
+        }
+    }
+
+    fn s3_store(client: Client, bucket: String) -> Box<dyn ObjectStore> {
+        Box::new(S3Store { client, bucket })
+    }
+
+    pub fn s3(
+        bucket: String,
+        region: String,
+        prefix: Option<String>,
+        access_key: &str,
+        secret_key: &str,
+    ) -> Self {
+        let client = build_client(access_key, secret_key, region, None, false);
+        Self::new("s3", Self::s3_store(client, bucket), prefix)
+    }
+
+    pub fn r2(
+        bucket: String,
+        account_id: String,
+        prefix: Option<String>,
+        access_key: &str,
+        secret_key: &str,
+    ) -> Self {
+        let endpoint = format!("https://{}.r2.cloudflarestorage.com", account_id);
+        let client = build_client(access_key, secret_key, "auto".into(), Some(endpoint), false);
+        Self::new("r2", Self::s3_store(client, bucket), prefix)
+    }
+
+    pub fn minio(bucket: String, endpoint: String, access_key: &str, secret_key: &str) -> Self {
+        let client = build_client(
+            access_key,
+            secret_key,
+            "us-east-1".into(),
+            Some(endpoint),
+            true,
+        );
+        Self::new("minio", Self::s3_store(client, bucket), None)
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn key_for(&self, data_path: &Path, chunk_path: &Path) -> Result<String> {
+        let rel = chunk_path
+            .strip_prefix(data_path)
+            .map_err(|_| LogHavenError::Storage("chunk path not under data_path".into()))?;
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        Ok(if self.prefix.is_empty() {
+            rel
+        } else {
+            format!("{}/{}", self.prefix, rel)
+        })
+    }
+}
+
+/// Uploads finished chunks to one or more stores and remembers which ones are done.
+///
+/// A chunk `X.parquet` is synced once `X.parquet.synced` exists next to it, or
+/// once it was deleted after upload; with several targets that is only after every
+/// target has it. While some targets are still missing, `X.parquet.synced-<label>`
+/// records each one that is done, so a retry uploads to the missing targets only.
+/// Anything else is retried on the next run.
+pub struct CloudSyncer {
+    targets: Vec<Target>,
     data_path: PathBuf,
     pub delete_after_upload: bool,
 }
@@ -63,101 +137,64 @@ impl CloudSyncer {
         data_path: PathBuf,
         delete_after_upload: bool,
     ) -> Arc<Self> {
+        Self::with_targets(
+            vec![Target::new("store", store, prefix)],
+            data_path,
+            delete_after_upload,
+        )
+    }
+
+    /// At least one target.
+    pub fn with_targets(
+        targets: Vec<Target>,
+        data_path: PathBuf,
+        delete_after_upload: bool,
+    ) -> Arc<Self> {
+        assert!(!targets.is_empty(), "a syncer needs a target");
         Arc::new(Self {
-            store,
-            prefix: prefix.unwrap_or_default().trim_matches('/').to_string(),
+            targets,
             data_path,
             delete_after_upload,
         })
     }
 
-    pub fn new_s3(
-        bucket: String,
-        region: String,
-        prefix: Option<String>,
-        access_key: String,
-        secret_key: String,
-        data_path: PathBuf,
-        delete_after_upload: bool,
-    ) -> Arc<Self> {
-        let client = build_client(&access_key, &secret_key, region, None, false);
-        Self::with_store(
-            Box::new(S3Store { client, bucket }),
-            prefix,
-            data_path,
-            delete_after_upload,
-        )
+    #[cfg(test)]
+    pub fn target_labels(&self) -> Vec<String> {
+        self.targets.iter().map(|t| t.label.clone()).collect()
     }
 
-    pub fn new_r2(
-        bucket: String,
-        account_id: String,
-        prefix: Option<String>,
-        access_key: String,
-        secret_key: String,
-        data_path: PathBuf,
-        delete_after_upload: bool,
-    ) -> Arc<Self> {
-        let endpoint = format!("https://{}.r2.cloudflarestorage.com", account_id);
-        let client = build_client(
-            &access_key,
-            &secret_key,
-            "auto".into(),
-            Some(endpoint),
-            false,
-        );
-        Self::with_store(
-            Box::new(S3Store { client, bucket }),
-            prefix,
-            data_path,
-            delete_after_upload,
-        )
-    }
-
-    pub fn new_minio(
-        bucket: String,
-        endpoint: String,
-        access_key: String,
-        secret_key: String,
-        data_path: PathBuf,
-        delete_after_upload: bool,
-    ) -> Arc<Self> {
-        let client = build_client(
-            &access_key,
-            &secret_key,
-            "us-east-1".into(),
-            Some(endpoint),
-            true,
-        );
-        Self::with_store(
-            Box::new(S3Store { client, bucket }),
-            None,
-            data_path,
-            delete_after_upload,
-        )
-    }
-
-    fn key_for(&self, chunk_path: &Path) -> Result<String> {
-        let rel = chunk_path
-            .strip_prefix(&self.data_path)
-            .map_err(|_| LogHavenError::Storage("chunk path not under data_path".into()))?;
-        let rel = rel.to_string_lossy().replace('\\', "/");
-        Ok(if self.prefix.is_empty() {
-            rel
-        } else {
-            format!("{}/{}", self.prefix, rel)
-        })
-    }
-
-    /// Uploads one chunk, then marks it synced (or deletes it).
+    /// Uploads one chunk to every target that does not have it yet, then marks it synced
+    /// (or deletes it). A target that fails does not stop the others; the first error is
+    /// returned and the chunk stays unsynced.
     pub async fn upload_chunk(&self, chunk_path: &Path) -> Result<()> {
-        let key = self.key_for(chunk_path)?;
-        self.store.put(&key, chunk_path).await?;
+        let several = self.targets.len() > 1;
+        let mut failed = None;
+        for t in &self.targets {
+            if several && partial_marker(chunk_path, &t.label).exists() {
+                continue;
+            }
+            let key = t.key_for(&self.data_path, chunk_path)?;
+            match t.store.put(&key, chunk_path).await {
+                Ok(()) if several => std::fs::write(partial_marker(chunk_path, &t.label), b"")?,
+                Ok(()) => {}
+                Err(e) => {
+                    failed.get_or_insert(e);
+                }
+            }
+        }
+        if let Some(e) = failed {
+            return Err(e);
+        }
 
         if self.delete_after_upload {
             std::fs::remove_file(chunk_path)?;
         } else {
             std::fs::write(marker_path(chunk_path), b"")?;
+        }
+        if several {
+            for t in &self.targets {
+                let _ = std::fs::remove_file(partial_marker(chunk_path, &t.label));
+            }
         }
         Ok(())
     }
@@ -174,6 +211,10 @@ impl CloudSyncer {
         }
         failures
     }
+}
+
+fn partial_marker(chunk: &Path, label: &str) -> PathBuf {
+    chunk.with_extension(format!("parquet.{SYNCED_SUFFIX}-{label}"))
 }
 
 pub(crate) fn marker_path(chunk: &Path) -> PathBuf {
@@ -309,10 +350,18 @@ mod tests {
         ] {
             let (s, _, tmp) = setup("keys", prefix, false);
             let p = tmp.join("web/2024-01-01/a.parquet");
-            assert_eq!(s.key_for(&p).unwrap(), expect, "{prefix:?}");
+            assert_eq!(
+                s.targets[0].key_for(&tmp, &p).unwrap(),
+                expect,
+                "{prefix:?}"
+            );
         }
-        let (s, _, _) = setup("keys-out", None, false);
-        assert!(s.key_for(Path::new("/elsewhere/x.parquet")).is_err());
+        let (s, _, tmp) = setup("keys-out", None, false);
+        assert!(
+            s.targets[0]
+                .key_for(&tmp, Path::new("/elsewhere/x.parquet"))
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -404,5 +453,96 @@ mod tests {
         assert!(store.puts.lock().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&other);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn setup_two(
+        name: &str,
+        delete: bool,
+    ) -> (Arc<CloudSyncer>, Arc<MockStore>, Arc<MockStore>, PathBuf) {
+        let tmp = std::env::temp_dir().join(format!("lh-c2-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let (first, second) = (
+            Arc::new(MockStore::default()),
+            Arc::new(MockStore::default()),
+        );
+        let syncer = CloudSyncer::with_targets(
+            vec![
+                Target::new("s3", Box::new(first.clone()), Some("one".into())),
+                Target::new("r2", Box::new(second.clone()), Some("two".into())),
+            ],
+            tmp.clone(),
+            delete,
+        );
+        (syncer, first, second, tmp)
+    }
+
+    #[tokio::test]
+    async fn every_target_gets_the_chunk_under_its_own_prefix() {
+        let (s, first, second, tmp) = setup_two("both", false);
+        let a = chunk(&tmp, "web", "2024-01-01", "1-1.parquet");
+        assert_eq!(s.sync_app(&tmp.join("web")).await, 0);
+        assert_eq!(
+            *first.puts.lock().unwrap(),
+            ["one/web/2024-01-01/1-1.parquet"]
+        );
+        assert_eq!(
+            *second.puts.lock().unwrap(),
+            ["two/web/2024-01-01/1-1.parquet"]
+        );
+        assert!(a.exists() && marker_path(&a).exists());
+        assert!(!partial_marker(&a, "s3").exists() && !partial_marker(&a, "r2").exists());
+        s.sync_app(&tmp.join("web")).await;
+        assert_eq!(first.puts.lock().unwrap().len(), 1, "no re-upload");
+    }
+
+    #[tokio::test]
+    async fn a_failing_target_does_not_stop_the_other_and_only_it_is_retried() {
+        for delete in [false, true] {
+            let (s, first, second, tmp) = setup_two("one-down", delete);
+            let a = chunk(&tmp, "web", "2024-01-01", "1-1.parquet");
+            second
+                .fail_all
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+
+            assert_eq!(s.sync_app(&tmp.join("web")).await, 1);
+            assert_eq!(
+                first.puts.lock().unwrap().len(),
+                1,
+                "the healthy target has it"
+            );
+            assert!(a.exists(), "kept until every target has it");
+            assert!(!marker_path(&a).exists(), "not synced yet");
+            assert!(partial_marker(&a, "s3").exists());
+
+            second
+                .fail_all
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(s.sync_app(&tmp.join("web")).await, 0);
+            assert_eq!(first.puts.lock().unwrap().len(), 1, "not uploaded again");
+            assert_eq!(second.puts.lock().unwrap().len(), 1);
+            assert_eq!(a.exists(), !delete);
+            assert_eq!(marker_path(&a).exists(), !delete);
+            assert!(!partial_marker(&a, "s3").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_first_target_failing_is_retried_while_the_second_keeps_its_copy() {
+        let (s, first, second, tmp) = setup_two("first-down", false);
+        let a = chunk(&tmp, "web", "2024-01-01", "1-1.parquet");
+        first
+            .fail_all
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(s.sync_app(&tmp.join("web")).await, 1);
+        assert_eq!(second.puts.lock().unwrap().len(), 1);
+        assert!(!marker_path(&a).exists());
+
+        first
+            .fail_all
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(s.sync_app(&tmp.join("web")).await, 0);
+        assert_eq!(second.puts.lock().unwrap().len(), 1, "not uploaded again");
+        assert!(marker_path(&a).exists());
     }
 }

@@ -15,7 +15,7 @@ pub use record::LogRecord;
 
 use crate::config::Config;
 use crate::error::{LogHavenError, Result};
-use cloud::CloudSyncer;
+use cloud::{CloudSyncer, Target};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -93,118 +93,130 @@ impl StorageRouter {
 
 fn resolve_syncer(config: &Config) -> Result<Option<std::sync::Arc<CloudSyncer>>> {
     let backend = config.storage.backend.as_str();
-    let data_path = config.storage.local.path.clone();
-
+    let mut targets = vec![];
     match backend {
-        "local" => Ok(None),
+        "local" => {}
+        "s3" | "r2" | "minio" => targets.push(required_target(config, backend)?),
+        "auto" => targets.extend(auto_detect_target(config)),
+        _ => {
+            return Err(LogHavenError::Config(format!(
+                "unknown backend: {}",
+                backend
+            )));
+        }
+    }
 
+    if let Some(second) = config.storage.secondary.as_deref() {
+        if !matches!(second, "s3" | "r2" | "minio") {
+            return Err(LogHavenError::Config(format!(
+                "unknown secondary: {second} (use s3, r2 or minio)"
+            )));
+        }
+        let Some(first) = targets.first() else {
+            return Err(LogHavenError::Config(
+                "secondary needs a cloud backend: set backend to s3, r2, minio or auto".into(),
+            ));
+        };
+        if first.label() == second {
+            return Err(LogHavenError::Config(format!(
+                "secondary is the same store as the backend ({second}); pick a different one"
+            )));
+        }
+        targets.push(required_target(config, second)?);
+    }
+
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(CloudSyncer::with_targets(
+        targets,
+        config.storage.local.path.clone(),
+        config.storage.delete_after_upload,
+    )))
+}
+
+/// The named store, which must be fully configured.
+fn required_target(config: &Config, kind: &str) -> Result<Target> {
+    match kind {
         "s3" => {
             let s3 = config.storage.s3.as_ref().ok_or_else(|| {
-                LogHavenError::Config("backend=s3 but no [storage.s3] config".into())
+                LogHavenError::Config(format!(
+                    "{kind} is used but there is no [storage.s3] config"
+                ))
             })?;
-            let key = required_key(&s3.access_key, "s3.access_key")?;
-            let secret = required_key(&s3.secret_key, "s3.secret_key")?;
-            Ok(Some(CloudSyncer::new_s3(
+            Ok(Target::s3(
                 s3.bucket.clone(),
                 s3.region.clone(),
                 s3.prefix.clone(),
-                key,
-                secret,
-                data_path,
-                config.storage.delete_after_upload,
-            )))
+                &required_key(&s3.access_key, "s3.access_key")?,
+                &required_key(&s3.secret_key, "s3.secret_key")?,
+            ))
         }
-
         "r2" => {
             let r2 = config.storage.r2.as_ref().ok_or_else(|| {
-                LogHavenError::Config("backend=r2 but no [storage.r2] config".into())
+                LogHavenError::Config(format!(
+                    "{kind} is used but there is no [storage.r2] config"
+                ))
             })?;
-            let key = required_key(&r2.access_key, "r2.access_key")?;
-            let secret = required_key(&r2.secret_key, "r2.secret_key")?;
-            Ok(Some(CloudSyncer::new_r2(
+            Ok(Target::r2(
                 r2.bucket.clone(),
                 r2.account_id.clone(),
                 r2.prefix.clone(),
-                key,
-                secret,
-                data_path,
-                config.storage.delete_after_upload,
-            )))
+                &required_key(&r2.access_key, "r2.access_key")?,
+                &required_key(&r2.secret_key, "r2.secret_key")?,
+            ))
         }
-
-        "minio" => {
+        _ => {
             let m = config.storage.minio.as_ref().ok_or_else(|| {
-                LogHavenError::Config("backend=minio but no [storage.minio] config".into())
+                LogHavenError::Config(format!(
+                    "{kind} is used but there is no [storage.minio] config"
+                ))
             })?;
-            Ok(Some(CloudSyncer::new_minio(
+            Ok(Target::minio(
                 m.bucket.clone(),
                 m.endpoint.clone(),
-                m.access_key.clone(),
-                m.secret_key.clone(),
-                data_path,
-                config.storage.delete_after_upload,
-            )))
+                &m.access_key,
+                &m.secret_key,
+            ))
         }
-
-        "auto" => Ok(auto_detect_syncer(config, data_path)),
-
-        _ => Err(LogHavenError::Config(format!(
-            "unknown backend: {}",
-            backend
-        ))),
     }
 }
 
-fn auto_detect_syncer(
-    config: &Config,
-    data_path: std::path::PathBuf,
-) -> Option<std::sync::Arc<CloudSyncer>> {
-    // S3 keys present?
+/// The first of S3, R2 and MinIO that has credentials.
+fn auto_detect_target(config: &Config) -> Option<Target> {
     if let Some(s3) = &config.storage.s3
         && let (Some(key), Some(secret)) = (&s3.access_key, &s3.secret_key)
     {
-        return Some(CloudSyncer::new_s3(
+        return Some(Target::s3(
             s3.bucket.clone(),
             s3.region.clone(),
             s3.prefix.clone(),
-            key.clone(),
-            secret.clone(),
-            data_path,
-            config.storage.delete_after_upload,
+            key,
+            secret,
         ));
     }
-
-    // R2 keys present?
     if let Some(r2) = &config.storage.r2
         && let (Some(key), Some(secret)) = (&r2.access_key, &r2.secret_key)
     {
-        return Some(CloudSyncer::new_r2(
+        return Some(Target::r2(
             r2.bucket.clone(),
             r2.account_id.clone(),
             r2.prefix.clone(),
-            key.clone(),
-            secret.clone(),
-            data_path,
-            config.storage.delete_after_upload,
+            key,
+            secret,
         ));
     }
-
-    // MinIO configured?
     if let Some(m) = &config.storage.minio
         && !m.access_key.is_empty()
         && !m.secret_key.is_empty()
     {
-        return Some(CloudSyncer::new_minio(
+        return Some(Target::minio(
             m.bucket.clone(),
             m.endpoint.clone(),
-            m.access_key.clone(),
-            m.secret_key.clone(),
-            data_path,
-            config.storage.delete_after_upload,
+            &m.access_key,
+            &m.secret_key,
         ));
     }
-
-    // No cloud config found — fall back to local only
     None
 }
 
@@ -296,5 +308,72 @@ mod tests {
         let mut local = crate::config::default_config();
         local.storage.backend = "local".into();
         assert!(resolve_syncer(&local).unwrap().is_none());
+    }
+
+    fn two_stores(backend: &str, secondary: Option<&str>) -> Config {
+        let mut cfg = s3_config(None);
+        cfg.storage.backend = backend.into();
+        cfg.storage.secondary = secondary.map(String::from);
+        cfg.storage.minio = Some(crate::config::MinioStorageConfig {
+            endpoint: "http://localhost:9000".into(),
+            bucket: "b".into(),
+            access_key: "k".into(),
+            secret_key: "s".into(),
+        });
+        cfg
+    }
+
+    fn labels(cfg: &Config) -> Result<Vec<String>> {
+        Ok(resolve_syncer(cfg)?
+            .map(|s| s.target_labels())
+            .unwrap_or_default())
+    }
+
+    #[test]
+    fn a_secondary_adds_a_second_upload_target() {
+        assert_eq!(labels(&two_stores("s3", None)).unwrap(), ["s3"]);
+        assert_eq!(
+            labels(&two_stores("s3", Some("minio"))).unwrap(),
+            ["s3", "minio"]
+        );
+        assert_eq!(
+            labels(&two_stores("auto", Some("minio"))).unwrap(),
+            ["s3", "minio"]
+        );
+        assert!(labels(&two_stores("local", None)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_secondary_that_cannot_work_is_a_startup_error() {
+        let err = |b: &str, s: &str| {
+            labels(&two_stores(b, Some(s)))
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+        };
+        assert!(err("local", "minio").contains("needs a cloud backend"));
+        assert!(err("s3", "s3").contains("same store"));
+        assert!(err("auto", "s3").contains("same store"));
+        assert!(err("s3", "gcs").contains("unknown secondary"));
+        let mut cfg = two_stores("s3", Some("r2"));
+        cfg.storage.r2 = None;
+        assert!(
+            labels(&cfg)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("[storage.r2]")
+        );
+        // an auto backend with nothing configured has no first target for a secondary to follow
+        let mut cfg = two_stores("auto", Some("minio"));
+        cfg.storage.s3 = None;
+        cfg.storage.minio = None;
+        assert!(
+            labels(&cfg)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("needs a cloud backend")
+        );
     }
 }
