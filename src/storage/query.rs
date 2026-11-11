@@ -3,7 +3,12 @@ use crate::storage::date::parse_date;
 use crate::storage::record::LogRecord;
 use arrow::array::{Array, Int64Array, LargeStringArray, StringArray};
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelection,
+    RowSelector,
+};
+use parquet::file::metadata::PageIndexPolicy;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -71,6 +76,8 @@ pub fn query(data_path: &Path, filter: &QueryFilter) -> Result<Vec<LogRecord>> {
     date_dirs.sort_by_key(|(day, _)| std::cmp::Reverse(*day));
 
     let mut results: Vec<LogRecord> = Vec::new();
+    // once `limit` records are held, an older record can no longer be among the newest
+    let mut floor: Option<i64> = None;
 
     for (_, date_dir) in &date_dirs {
         // every record of a later date is newer than any record of an earlier one
@@ -78,7 +85,7 @@ pub fn query(data_path: &Path, filter: &QueryFilter) -> Result<Vec<LogRecord>> {
             break;
         }
         for chunk_path in chunk_files(date_dir)? {
-            let records = match read_parquet_file(&chunk_path, filter, text_lc.as_deref()) {
+            let records = match read_chunk(&chunk_path, filter, text_lc.as_deref(), floor) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!(
@@ -91,6 +98,12 @@ pub fn query(data_path: &Path, filter: &QueryFilter) -> Result<Vec<LogRecord>> {
             };
             results.extend(records);
             trim_newest(&mut results, filter.limit, false);
+            if results.len() >= filter.limit {
+                trim_newest(&mut results, filter.limit, true);
+                if results.len() >= filter.limit {
+                    floor = results.last().map(|r| r.timestamp_ms);
+                }
+            }
         }
     }
 
@@ -222,8 +235,17 @@ fn row_groups_to_read(
     meta: &parquet::file::metadata::ParquetMetaData,
     filter: &QueryFilter,
 ) -> Vec<usize> {
+    row_groups_to_read_from(meta, filter, filter.from_ms)
+}
+
+/// `row_groups_to_read` with the lower time bound given separately from the filter's.
+fn row_groups_to_read_from(
+    meta: &parquet::file::metadata::ParquetMetaData,
+    filter: &QueryFilter,
+    from_ms: Option<i64>,
+) -> Vec<usize> {
     use parquet::file::statistics::Statistics;
-    let mut groups = overlapping_row_groups(meta, filter.from_ms, filter.to_ms);
+    let mut groups = overlapping_row_groups(meta, from_ms, filter.to_ms);
     let Some(want) = filter.tx_hash.as_deref() else {
         return groups;
     };
@@ -317,37 +339,203 @@ fn bloom_filtered(
         .collect()
 }
 
-/// Reads the records of one chunk that match `filter`. Rows are checked
-/// against the column arrays first, so non-matching rows never allocate a
-/// `LogRecord`.
+/// Reads the records of one chunk that match `filter`.
 fn read_parquet_file(
     path: &Path,
     filter: &QueryFilter,
     text_lc: Option<&str>,
 ) -> Result<Vec<LogRecord>> {
-    let (from_ms, to_ms) = (filter.from_ms, filter.to_ms);
-    let evm_fold = filter.tx_hash.as_deref().is_some_and(is_evm_hash);
+    read_chunk(path, filter, text_lc, None)
+}
+
+/// The columns a row needs to be judged against `filter`, so the rest (the large `message`,
+/// `tags` and `metadata` among them) are decoded only for rows that match.
+fn filter_columns(filter: &QueryFilter, text: bool) -> Vec<&'static str> {
+    let mut cols = vec!["timestamp_ms"];
+    if filter.level.is_some() {
+        cols.push("level");
+    }
+    if filter.source.is_some() {
+        cols.push("source");
+    }
+    if filter.tx_hash.is_some() {
+        cols.push("tx_hash");
+    }
+    if text {
+        cols.extend(["message", "tags", "metadata"]);
+    }
+    cols
+}
+
+struct RowTest<'a> {
+    filter: &'a QueryFilter,
+    text_lc: Option<&'a str>,
+    evm_fold: bool,
+    from_ms: Option<i64>,
+}
+
+/// The columns of one batch that `RowTest` looks at, found once instead of once per row.
+struct BatchCols<'a> {
+    test: &'a RowTest<'a>,
+    tss: Option<&'a Int64Array>,
+    levels: Option<&'a StringArray>,
+    sources: Option<&'a StringArray>,
+    tx_hashes: Option<&'a StringArray>,
+    messages: Option<&'a LargeStringArray>,
+    tags: Option<&'a StringArray>,
+    metadata: Option<&'a StringArray>,
+}
+
+impl<'a> RowTest<'a> {
+    fn bind(&'a self, batch: &'a RecordBatch) -> BatchCols<'a> {
+        BatchCols {
+            test: self,
+            tss: col(batch, "timestamp_ms"),
+            levels: col(batch, "level"),
+            sources: col(batch, "source"),
+            tx_hashes: col(batch, "tx_hash"),
+            messages: col(batch, "message"),
+            tags: col(batch, "tags"),
+            metadata: col(batch, "metadata"),
+        }
+    }
+}
+
+impl BatchCols<'_> {
+    fn matches(&self, row: usize) -> bool {
+        let filter = self.test.filter;
+        let Some(tss) = self.tss else { return false };
+        if tss.is_null(row) {
+            return false; // a record without a time cannot be placed or ordered
+        }
+        let ts = tss.value(row);
+        if self.test.from_ms.is_some_and(|f| ts < f) || filter.to_ms.is_some_and(|t| ts > t) {
+            return false;
+        }
+        // an absent value never equals the wanted one, but a wanted "" matches it
+        let eq_or_empty = |a: Option<&StringArray>, want: &Option<String>| {
+            let Some(want) = want else { return true };
+            match a {
+                Some(a) if !a.is_null(row) => a.value(row) == want,
+                _ => want.is_empty(),
+            }
+        };
+        if !eq_or_empty(self.sources, &filter.source) || !eq_or_empty(self.levels, &filter.level) {
+            return false;
+        }
+        if let Some(want) = &filter.tx_hash {
+            let hit = self.tx_hashes.is_some_and(|a| {
+                !a.is_null(row)
+                    && if self.test.evm_fold {
+                        a.value(row).eq_ignore_ascii_case(want)
+                    } else {
+                        a.value(row) == want
+                    }
+            });
+            if !hit {
+                return false;
+            }
+        }
+        if let Some(needle) = self.test.text_lc {
+            let in_str = |a: Option<&StringArray>| {
+                a.is_some_and(|a| !a.is_null(row) && a.value(row).to_lowercase().contains(needle))
+            };
+            let in_msg = self
+                .messages
+                .is_some_and(|a| !a.is_null(row) && a.value(row).to_lowercase().contains(needle));
+            if !(in_msg || in_str(self.tags) || in_str(self.metadata)) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Like `read_parquet_file`, and a record older than `floor` is not wanted (the caller already
+/// holds enough newer ones), so chunks and row groups that end before it are not decoded.
+///
+/// The chunk is read twice: first only the columns the filter looks at, to find the matching
+/// rows, then every column of just those rows.
+fn read_chunk(
+    path: &Path,
+    filter: &QueryFilter,
+    text_lc: Option<&str>,
+    floor: Option<i64>,
+) -> Result<Vec<LogRecord>> {
+    let storage_err = |e: &dyn std::fmt::Display| LogHavenError::Storage(e.to_string());
+    let from_ms = match (filter.from_ms, floor) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
     let file = File::open(path)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LogHavenError::Storage(e.to_string()))?;
+    let meta = ArrowReaderMetadata::load(
+        &file,
+        ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional),
+    )
+    .map_err(|e| storage_err(&e))?;
+    let probe = ParquetRecordBatchReaderBuilder::new_with_metadata(file.try_clone()?, meta.clone());
     let groups = bloom_filtered(
-        &builder,
-        row_groups_to_read(builder.metadata(), filter),
+        &probe,
+        row_groups_to_read_from(probe.metadata(), filter, from_ms),
         filter,
     );
     if groups.is_empty() {
         return Ok(Vec::new());
     }
-    let reader = builder
-        .with_row_groups(groups)
+
+    let schema = meta.metadata().file_metadata().schema_descr_ptr();
+    let wanted = filter_columns(filter, text_lc.is_some());
+    let indices: Vec<usize> = schema
+        .columns()
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| wanted.contains(&c.name()))
+        .map(|(i, _)| i)
+        .collect();
+    let test = RowTest {
+        filter,
+        text_lc,
+        evm_fold: filter.tx_hash.as_deref().is_some_and(is_evm_hash),
+        from_ms,
+    };
+    let scan = probe
+        .with_row_groups(groups.clone())
+        .with_projection(ProjectionMask::leaves(&schema, indices))
         .build()
-        .map_err(|e| LogHavenError::Storage(e.to_string()))?;
+        .map_err(|e| storage_err(&e))?;
+    let mut selectors: Vec<RowSelector> = Vec::new();
+    let (mut selected, mut total) = (0usize, 0usize);
+    for batch in scan {
+        let batch = batch.map_err(|e| storage_err(&e))?;
+        let cols = test.bind(&batch);
+        for row in 0..batch.num_rows() {
+            let hit = cols.matches(row);
+            match selectors.last_mut() {
+                Some(last) if last.skip != hit => last.row_count += 1,
+                _ => selectors.push(if hit {
+                    RowSelector::select(1)
+                } else {
+                    RowSelector::skip(1)
+                }),
+            }
+            selected += usize::from(hit);
+        }
+        total += batch.num_rows();
+    }
+    if selected == 0 {
+        return Ok(Vec::new());
+    }
 
-    let mut records = Vec::new();
+    let mut read =
+        ParquetRecordBatchReaderBuilder::new_with_metadata(file, meta).with_row_groups(groups);
+    if selected < total {
+        read = read.with_row_selection(RowSelection::from(selectors));
+    }
+    let reader = read.build().map_err(|e| storage_err(&e))?;
 
+    let mut records = Vec::with_capacity(selected);
     for batch in reader {
-        let batch = batch.map_err(|e| LogHavenError::Storage(e.to_string()))?;
-
+        let batch = batch.map_err(|e| storage_err(&e))?;
         let missing =
             |name: &str| LogHavenError::Storage(format!("column '{name}' missing or mistyped"));
         let ids = col::<StringArray>(&batch, "id").ok_or_else(|| missing("id"))?;
@@ -366,49 +554,6 @@ fn read_parquet_file(
         let metadata = col::<StringArray>(&batch, "metadata");
 
         for row in 0..batch.num_rows() {
-            if tss.is_null(row) {
-                continue; // a record without a time cannot be placed or ordered
-            }
-            let ts = tss.value(row);
-            if from_ms.is_some_and(|f| ts < f) || to_ms.is_some_and(|t| ts > t) {
-                continue;
-            }
-            let eq = |a: &StringArray, want: &Option<String>| {
-                want.as_ref()
-                    .is_none_or(|w| !a.is_null(row) && a.value(row) == w)
-            };
-            // an absent value never equals the wanted one, but a wanted "" matches it
-            let eq_or_empty = |a: &StringArray, want: &Option<String>| {
-                eq(a, want) || want.as_deref() == Some("") && a.is_null(row)
-            };
-            if !eq_or_empty(sources, &filter.source) || !eq_or_empty(levels, &filter.level) {
-                continue;
-            }
-            if let Some(want) = &filter.tx_hash {
-                let hit = tx_hashes.is_some_and(|a| {
-                    !a.is_null(row)
-                        && if evm_fold {
-                            a.value(row).eq_ignore_ascii_case(want)
-                        } else {
-                            a.value(row) == want
-                        }
-                });
-                if !hit {
-                    continue;
-                }
-            }
-            if let Some(needle) = text_lc {
-                let in_str = |a: Option<&StringArray>| {
-                    a.is_some_and(|a| {
-                        !a.is_null(row) && a.value(row).to_lowercase().contains(needle)
-                    })
-                };
-                let in_msg =
-                    !messages.is_null(row) && messages.value(row).to_lowercase().contains(needle);
-                if !(in_msg || in_str(tags) || in_str(metadata)) {
-                    continue;
-                }
-            }
             let non_empty = |a| str_at(a, row).filter(|s| !s.is_empty());
             records.push(LogRecord {
                 id: str_at(Some(ids), row).unwrap_or_default(),
@@ -1096,6 +1241,264 @@ mod tests {
             .unwrap()
             .len(),
             2
+        );
+    }
+
+    /// The same answer as reading every chunk whole and filtering the rows with plain code.
+    fn reference(fx: &Fixture, f: &QueryFilter) -> Vec<String> {
+        let mut all = vec![];
+        for day in std::fs::read_dir(fx.tmp.join("web")).unwrap().flatten() {
+            for chunk in chunk_files(&day.path()).unwrap() {
+                let whole = QueryFilter {
+                    limit: usize::MAX,
+                    ..filter()
+                };
+                all.extend(read_parquet_file(&chunk, &whole, None).unwrap());
+            }
+        }
+        let text = f.text.as_deref().map(str::to_lowercase);
+        all.retain(|r| {
+            f.from_ms.is_none_or(|t| r.timestamp_ms >= t)
+                && f.to_ms.is_none_or(|t| r.timestamp_ms <= t)
+                && f.level.as_ref().is_none_or(|l| &r.level == l)
+                && f.source.as_ref().is_none_or(|s| &r.source == s)
+                && f.tx_hash
+                    .as_ref()
+                    .is_none_or(|h| r.tx_hash.as_ref() == Some(h))
+                && text.as_ref().is_none_or(|t| {
+                    [Some(&r.message), r.tags.as_ref(), r.metadata.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .any(|s| s.to_lowercase().contains(t))
+                })
+        });
+        all.sort_by(newest_first);
+        all.truncate(f.limit);
+        all.into_iter().map(|r| r.id).collect()
+    }
+
+    #[test]
+    fn query_gives_the_answer_of_a_plain_scan_for_any_filter_and_limit() {
+        let mut fx = Fixture::new("equiv");
+        let mut x: u64 = 0x2545f4914f6cdd1d;
+        let mut next = move |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        let mut n = 0u64;
+        // chunks of unequal size, on three days, with timestamps that repeat across chunks;
+        // the biggest one is longer than a decoding batch
+        for (day, size) in [
+            (0, 40),
+            (0, 20_000),
+            (0, 7),
+            (1, 300),
+            (1, 1),
+            (2, 90),
+            (2, 90),
+        ] {
+            let recs: Vec<LogRecord> = (0..size)
+                .map(|_| {
+                    n += 1;
+                    let mut r = rec(T0 + day * DAY + next(50) as i64 * 1000, "");
+                    r.id = format!("{n:08}");
+                    r.message = format!(
+                        "m{} {}",
+                        next(30),
+                        if next(9) == 0 { "NEEDLE" } else { "x" }
+                    );
+                    r.level = ["info", "warn", "error"][next(3) as usize].into();
+                    r.source = ["a", "b"][next(2) as usize].into();
+                    r.tx_hash = (next(8) == 0).then(|| format!("0x{:04x}", next(6)));
+                    r.metadata = (next(5) == 0).then(|| "meta Needle".to_string());
+                    r
+                })
+                .collect();
+            fx.chunk("web", recs);
+        }
+        for round in 0..120 {
+            let f = QueryFilter {
+                level: (next(3) == 0)
+                    .then(|| ["info", "warn", "error", ""][next(4) as usize].into()),
+                source: (next(3) == 0).then(|| ["a", "b", "c"][next(3) as usize].into()),
+                tx_hash: (next(4) == 0).then(|| format!("0x{:04x}", next(6))),
+                text: (next(3) == 0).then(|| ["needle", "m7", "zzz"][next(3) as usize].into()),
+                from_ms: (next(3) == 0).then(|| T0 + next(3) as i64 * DAY + next(60) as i64 * 1000),
+                to_ms: (next(3) == 0).then(|| T0 + next(3) as i64 * DAY + next(60) as i64 * 1000),
+                limit: [1, 2, 7, 50, 400, 100_000][next(6) as usize],
+                ..filter()
+            };
+            if f.from_ms.zip(f.to_ms).is_some_and(|(a, b)| a > b) {
+                continue;
+            }
+            let got: Vec<String> = fx
+                .q(QueryFilter { ..clone_filter(&f) })
+                .into_iter()
+                .map(|r| r.id)
+                .collect();
+            assert_eq!(got, reference(&fx, &f), "round {round}: {:?}", describe(&f));
+        }
+    }
+
+    fn clone_filter(f: &QueryFilter) -> QueryFilter {
+        QueryFilter {
+            app: f.app.clone(),
+            source: f.source.clone(),
+            level: f.level.clone(),
+            from_ms: f.from_ms,
+            to_ms: f.to_ms,
+            text: f.text.clone(),
+            tx_hash: f.tx_hash.clone(),
+            limit: f.limit,
+        }
+    }
+
+    fn describe(f: &QueryFilter) -> String {
+        format!(
+            "level={:?} source={:?} tx={:?} text={:?} from={:?} to={:?} limit={}",
+            f.level, f.source, f.tx_hash, f.text, f.from_ms, f.to_ms, f.limit
+        )
+    }
+
+    #[test]
+    fn a_limit_cut_inside_equal_timestamps_across_chunks_keeps_the_highest_ids() {
+        let mut fx = Fixture::new("ties-across");
+        for chunk in 0..4u64 {
+            let recs: Vec<LogRecord> = (0..5u64)
+                .map(|i| {
+                    let mut r = rec(T0, "same");
+                    r.id = format!("{:08}", chunk * 5 + i);
+                    r
+                })
+                .collect();
+            fx.chunk("web", recs);
+        }
+        let got = fx.q(QueryFilter {
+            limit: 7,
+            ..filter()
+        });
+        let ids: Vec<&str> = got.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "00000019", "00000018", "00000017", "00000016", "00000015", "00000014", "00000013"
+            ]
+        );
+    }
+
+    #[test]
+    fn long_runs_of_matching_and_skipped_rows_in_one_chunk_are_read_exactly() {
+        let mut fx = Fixture::new("runs");
+        let recs: Vec<LogRecord> = (0..30_000u64)
+            .map(|i| {
+                let mut r = rec(T0 + i as i64, "x");
+                r.id = format!("{i:08}");
+                r.level = if (9_000..21_000).contains(&i) {
+                    "error"
+                } else {
+                    "info"
+                }
+                .into();
+                r
+            })
+            .collect();
+        fx.chunk("web", recs);
+        let got = fx.q(QueryFilter {
+            level: Some("error".into()),
+            limit: 100_000,
+            ..filter()
+        });
+        assert_eq!(got.len(), 12_000);
+        assert_eq!(got[0].id, "00020999");
+        assert_eq!(got[11_999].id, "00009000");
+    }
+
+    /// `cargo test --release bench_query -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_query() {
+        let mut fx = Fixture::new("bench");
+        let mut x: u64 = 0x9e3779b97f4a7c15;
+        let mut noise = |n: usize| -> String {
+            (0..n)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    char::from(b'a' + (x % 26) as u8)
+                })
+                .collect()
+        };
+        let chunks = 100;
+        let per = 2000;
+        for c in 0..chunks {
+            let recs: Vec<LogRecord> = (0..per)
+                .map(|i| {
+                    let n = c * per + i;
+                    let mut r = rec(T0 + n as i64, &noise(300));
+                    r.level = if n % 100 == 0 { "error" } else { "info" }.into();
+                    r.metadata = Some(noise(500));
+                    r.tx_hash = (n % 50 == 0).then(|| format!("0x{n:064x}"));
+                    r
+                })
+                .collect();
+            fx.chunk("web", recs);
+        }
+        let time = |name: &str, f: QueryFilter| {
+            let t = std::time::Instant::now();
+            let n = fx.q(f).len();
+            println!(
+                "{name:<28} {n:>6} records {:>8.1} ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        };
+        time(
+            "newest 100",
+            QueryFilter {
+                limit: 100,
+                ..filter()
+            },
+        );
+        time(
+            "level=error limit 100",
+            QueryFilter {
+                level: Some("error".into()),
+                limit: 100,
+                ..filter()
+            },
+        );
+        time(
+            "level=error limit 5000",
+            QueryFilter {
+                level: Some("error".into()),
+                limit: 5000,
+                ..filter()
+            },
+        );
+        time(
+            "source=nothing",
+            QueryFilter {
+                source: Some("nothing".into()),
+                limit: 100,
+                ..filter()
+            },
+        );
+        time(
+            "tx_hash (one)",
+            QueryFilter {
+                tx_hash: Some(format!("0x{:064x}", 150_000)),
+                ..filter()
+            },
+        );
+        time(
+            "text=zzzzzzzz",
+            QueryFilter {
+                text: Some("zzzzzzzz".into()),
+                limit: 100,
+                ..filter()
+            },
         );
     }
 }
