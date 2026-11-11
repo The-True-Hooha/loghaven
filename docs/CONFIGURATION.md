@@ -43,11 +43,11 @@ on any command to read `NAME.toml` instead of `config.toml`.
 
 | Key | Default | Notes |
 |-----|---------|-------|
-| `backend` | `"auto"` | `local`: never upload. `s3` / `r2` / `minio`: upload to that store (its section and credentials are required, or startup fails). `auto`: upload to the first of S3, R2, MinIO that has credentials configured, otherwise stay local. Override with `LOGHAVEN_STORAGE_BACKEND`. |
+| `backend` | `"auto"` | `local`: never upload, even with `[[storage.targets]]` (this is also what `LOGHAVEN_STORAGE_BACKEND=local` does). `s3` / `r2` / `minio`: upload to that store (its section and credentials are required, or startup fails). `auto`: upload to the first of S3, R2, MinIO that has credentials configured, otherwise stay local. Override with `LOGHAVEN_STORAGE_BACKEND`. |
 | `delete_after_upload` | `false` | `true` removes a chunk from local disk once it is uploaded (with a `secondary`, once it is in both stores). Queries only read local chunks, so deleted chunks are no longer searchable. Switching this on later does not delete chunks that were already uploaded. |
 | `encrypt_uploads` | `false` | `true` encrypts every chunk with AES-256-GCM before it is uploaded, to every store; the object is named `<chunk>.parquet.enc`. Local chunks stay plain, so queries work as before. The key is 32 random bytes (64 hex characters): `LOGHAVEN_STORAGE_KEY` if set, otherwise `<keys_dir>/storage.key`, which is created with mode 0600 on first use (the daemon prints a notice) and is not overwritten by a start. If `storage.key` is missing but archived keys are beside it, the daemon refuses to start instead of making a new one. Each object records which key made it and is bound to its name `<app>/<date>/<chunk>.parquet`, so a chunk cannot be passed off under another name. Chunks uploaded before this was switched on stay unencrypted, and so does a chunk that was already uploaded to one of two stores before it was switched on. **Back the key up: without it uploaded chunks cannot be read.** See [Encrypted uploads](#encrypted-uploads). |
-| `secondary` | unset | A second store (`s3`, `r2` or `minio`) that every chunk is uploaded to as well as to the one `backend` selects, each under its own prefix. It must be a different store from the first, fully configured, and needs a cloud `backend` (not `local`); otherwise startup fails. Local disk stays the copy that queries read. |
-| `primary` | `"local"` | Unused; local disk is always the primary copy. |
+| `secondary` | unset | A second store (`s3`, `r2` or `minio`) that every chunk is uploaded to as well as to the one `backend` selects, each under its own prefix. It must be a different store from the first, fully configured, and needs a cloud `backend` (not `local`); otherwise startup fails. Local disk stays the copy that queries read. Not allowed together with `[[storage.targets]]`. |
+| `primary` | `"local"` | Unused and ignored; local disk is always the primary copy. |
 
 With a `secondary`, a chunk counts as uploaded once both stores have it. If one store is down, the other still gets the chunk, the chunk stays local and unsynced (and is never pruned or deleted), and each retry uploads only to the store that is missing it; `<chunk>.parquet.synced-<store>` marks the stores that are done. A `secondary` applies to chunks written after it was enabled: chunks already marked as synced to the first store are not copied to it.
 
@@ -72,8 +72,7 @@ The pruner runs at startup and then hourly. It only removes `YYYY-MM-DD`
 folders; it skips a day that was modified in the last hour and, when cloud
 sync is configured, any day that still has chunks that were not uploaded yet.
 
-Every store below is the same S3-API adapter; `s3`, `r2` and `minio` only fill in its
-settings differently. Anything that speaks the S3 API works through `[storage.s3]` with an
+The three sections below are the older way to configure uploads. The newer one is `[[storage.targets]]`, a list that also covers Azure and Google Cloud Storage; see [Storage targets](#storage-targets). `s3`, `r2` and `minio` are the same S3-API store with different settings. Anything that speaks the S3 API works through `[storage.s3]` with an
 `endpoint`, so there is no separate section per provider.
 
 ### `[storage.s3]`
@@ -104,7 +103,7 @@ Examples for `endpoint` (set `region` to the one the provider names; it is used 
 
 None of these named services was tried; the adapter was run against AWS-style, path-style and prefixed settings with a local S3 server. Report any service that needs another setting.
 
-Stores that do not speak the S3 API (Azure Blob Storage, Google Cloud Storage's native API, SFTP) are not supported yet. The upload code sits behind a small `ObjectStore` trait, so one is a new implementation of that trait plus a config section.
+Stores that do not use the S3 API (Azure Blob Storage, Google Cloud Storage's own API) are configured as `[[storage.targets]]` entries, described next; so is everything above.
 
 ### `[storage.r2]` (Cloudflare R2)
 
@@ -408,3 +407,50 @@ Decrypt a downloaded object with `loghaven storage decrypt FILE -o OUT.parquet`.
 `loghaven storage rotate-key` archives the current key as `storage.key.<id>` and makes a new one, so old uploads stay readable. The running daemon keeps the key it started with: restart it for new uploads to use the new key. With `LOGHAVEN_STORAGE_KEY` set, rotate by changing the variable and keep the old key for reading (put it in `storage.key.<id>` where `<id>` is the 16 hex characters shown in the error when a key is missing). Only files named exactly `storage.key` or `storage.key.<16 hex characters>` count as keys; anything else in `keys_dir` is ignored.
 
 While an upload is in progress a `<chunk>.parquet.enc.tmp` file (ciphertext, mode 0600) sits next to the chunk. It is removed when the upload ends, however it ends, and any left by a crash is removed at the next start. The chunk, the key and the data directory are as private as the rest of `keys_dir` and the data path: this feature protects what is in the store, not the machine.
+
+## Storage targets
+
+`[[storage.targets]]` lists where chunks are uploaded. Every chunk goes to every target; it is synced (and deleted, with `delete_after_upload`) once all of them have it. A target that is down does not stop the others, and retries go only to the target that is missing the chunk. `encrypt_uploads` encrypts the chunk once for all of them.
+
+```toml
+[[storage.targets]]
+name = "archive"            # a-z 0-9 - _, at most 32, unique; names the .synced-<name> markers
+type = "s3"                 # AWS S3 or any S3-compatible service
+bucket = "my-logs"
+region = "eu-west-1"
+prefix = "loghaven"         # optional
+# endpoint = "https://s3.us-west-004.backblazeb2.com"   # another service; unset is AWS
+# path_style = false        # true for an IP address, localhost or a bare host name
+access_key_env = "LOGHAVEN_S3_KEY"      # or access_key = "..."
+secret_key_env = "LOGHAVEN_S3_SECRET"   # or secret_key = "..."
+
+[[storage.targets]]
+name = "backup"
+type = "azure"              # Azure Blob Storage
+account = "mystorageaccount"
+container = "logs"
+# endpoint = "http://127.0.0.1:10000/devstoreaccount1"  # a sovereign cloud or the Azurite emulator
+access_key_env = "LOGHAVEN_AZURE_KEY"   # or sas_token / sas_token_env, one of them
+
+[[storage.targets]]
+name = "gcs"
+type = "gcs"                # Google Cloud Storage, its own API
+bucket = "my-logs"
+credentials_file = "/etc/loghaven/service-account.json"   # optional
+```
+
+**Credentials.** Each secret is written in the file (`x`) or named as an environment variable (`x_env`), not both; the variable must be set and not blank when the daemon starts or startup fails naming it (never its value), and surrounding whitespace such as a trailing newline is removed. A blank value written in the file is an error. An S3 target takes `access_key` and `secret_key` together, both in the file or both as `_env`, or neither. An Azure target takes an access key or a SAS token, not both. A SAS token may be pasted as the portal shows it, percent-encoding and leading `?` included.
+
+When a target gives its own credentials, nothing in the environment can change it: stray `AWS_ENDPOINT_URL_S3`, `AWS_SESSION_TOKEN`, `AZURE_STORAGE_*` or `GOOGLE_*` variables are ignored for it. A secret left out entirely falls back to the provider's usual ambient sources (`AWS_*` variables and instance roles, `AZURE_STORAGE_*` variables and managed identity, `GOOGLE_APPLICATION_CREDENTIALS` and the instance's service account), and then those variables are read as the provider's tools read them, so an `AWS_ENDPOINT_URL_S3` set in the environment applies to such a target.
+
+**Typos.** A key that does not belong to the target's `type`, or is misspelt (`acess_key_env`, `path-style`), is an error naming the target and the key, not a silent default.
+
+**Rules.** Names must be unique and are kept in the markers of chunks that are partly uploaded, so do not rename a target while chunks are waiting. A `prefix` is plain path segments: no empty, `.` or `..` segment, no backslash. A virtual-hosted S3 endpoint (the default) must be a dotted host name, because the bucket is put in front of it; an IP address, `localhost` or a bare name needs `path_style = true`, which the config check and the daemon both require. An upload that fails is reported with the provider's message, query strings removed (a SAS token or signature rides there), cut to 300 characters.
+
+**Large chunks.** A chunk up to 8 MiB is one request. A larger one is sent in 8 MiB parts that are read from the file as they go, so memory stays at a few parts. There is no per-request timeout; the whole upload is allowed two minutes plus the time the chunk needs at 256 KiB/s, and a timeout is retried at the next flush.
+
+**Replaces the older keys.** `backend`, `secondary` and the `[storage.s3]`, `[storage.r2]` and `[storage.minio]` sections still work and are read as targets named `s3`, `r2` and `minio`; they cannot be combined with `[[storage.targets]]`, and the daemon refuses to start with both. Two small changes came with the move: `r2` now addresses its bucket in the URL path (it works the same), and an `[storage.s3]` with an IP address or bare host name as `endpoint` is addressed by path automatically, as before. To move to the list, write one target per store you use and keep the same names, so chunks waiting for upload keep their markers. With `backend = "local"` no target is used.
+
+**Tested with:** requests to local fake servers, which check the URL, headers and body each store type sends and that a big chunk goes up in parts (these run with the tests); by hand, S3-style uploads, including a 20 MiB chunk in parts, to a local S3 server (moto) and Azure Blob Storage, including a 20 MiB chunk in parts, to the Azurite emulator, with credentials from environment variables, with encryption, and with one store down and back. Google Cloud Storage was not run against a real or emulated service, only configured and built, so treat it as untested. Real AWS, Azure and GCS accounts were not used.
+
+**Not covered:** stores with neither the S3 API nor Azure or Google's, such as SFTP or WebDAV. The upload code calls a single small `put` function, so one is an extra implementation of it and an extra `type`; ask if you need one. Uploads are write-only: nothing is read back, so with `delete_after_upload` the uploaded data is no longer searchable. 

@@ -92,6 +92,111 @@ pub struct StorageConfig {
     pub s3: Option<S3StorageConfig>,
     pub r2: Option<R2StorageConfig>,
     pub minio: Option<MinioStorageConfig>,
+
+    /// Where chunks are uploaded, as a list: `[[storage.targets]]`. Replaces `backend`,
+    /// `secondary` and the `[storage.s3|r2|minio]` sections, which stay supported on their own
+    /// but cannot be mixed with this list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<StorageTarget>,
+}
+
+/// One upload destination.
+#[derive(Debug, Clone, Serialize)]
+pub struct StorageTarget {
+    /// Names the target in the `.synced-<name>` markers of a chunk that is not yet in every
+    /// target. Lowercase letters, digits, `-` and `_`, at most 32, unique. Do not change it
+    /// while chunks are waiting to be uploaded.
+    pub name: String,
+    /// Put every object under this prefix.
+    #[serde(default)]
+    pub prefix: Option<String>,
+    #[serde(flatten)]
+    pub kind: TargetKind,
+}
+
+/// Credentials come from the config (`x`), from an environment variable (`x_env`, which keeps
+/// them out of `config.toml`), or, when neither is given, from the provider's usual ambient
+/// sources (`AWS_*`, `AZURE_STORAGE_*`, `GOOGLE_APPLICATION_CREDENTIALS`, instance roles).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+pub enum TargetKind {
+    /// AWS S3 and anything that speaks the S3 API.
+    S3 {
+        bucket: String,
+        #[serde(default)]
+        region: Option<String>,
+        /// Another S3-compatible service; unset is AWS.
+        #[serde(default)]
+        endpoint: Option<String>,
+        /// Bucket in the URL path instead of the host name.
+        #[serde(default)]
+        path_style: bool,
+        #[serde(default)]
+        access_key: Option<String>,
+        #[serde(default)]
+        access_key_env: Option<String>,
+        #[serde(default)]
+        secret_key: Option<String>,
+        #[serde(default)]
+        secret_key_env: Option<String>,
+    },
+    /// Azure Blob Storage.
+    Azure {
+        account: String,
+        container: String,
+        /// Another endpoint, for a sovereign cloud or the Azurite emulator.
+        #[serde(default)]
+        endpoint: Option<String>,
+        #[serde(default)]
+        access_key: Option<String>,
+        #[serde(default)]
+        access_key_env: Option<String>,
+        /// A SAS token such as `sv=...&sig=...`.
+        #[serde(default)]
+        sas_token: Option<String>,
+        #[serde(default)]
+        sas_token_env: Option<String>,
+    },
+    /// Google Cloud Storage, through its own API.
+    Gcs {
+        bucket: String,
+        /// A service-account JSON file.
+        #[serde(default)]
+        credentials_file: Option<String>,
+    },
+}
+
+/// Read by hand so that a misspelt or misplaced key is an error naming the target. With the kind
+/// flattened into the struct serde would ignore it, and a typo such as `acess_key_env` would
+/// quietly fall back to ambient credentials.
+impl<'de> Deserialize<'de> for StorageTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error;
+        let mut table = toml::Table::deserialize(d)?;
+        let mut text = |key: &str| match table.remove(key) {
+            None => Ok(None),
+            Some(toml::Value::String(s)) => Ok(Some(s)),
+            Some(_) => Err(D::Error::custom(format!(
+                "storage target: {key} must be a string"
+            ))),
+        };
+        let name =
+            text("name")?.ok_or_else(|| D::Error::custom("storage target: name is required"))?;
+        let prefix = text("prefix")?;
+        let kind = TargetKind::deserialize(toml::Value::Table(table))
+            .map_err(|e| D::Error::custom(format!("storage target '{name}': {e}")))?;
+        Ok(Self { name, prefix, kind })
+    }
+}
+
+impl TargetKind {
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::S3 { .. } => "s3",
+            Self::Azure { .. } => "azure",
+            Self::Gcs { .. } => "gcs",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +386,7 @@ impl Default for StorageConfig {
             s3: None,
             r2: None,
             minio: None,
+            targets: vec![],
         }
     }
 }
