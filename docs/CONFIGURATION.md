@@ -72,6 +72,10 @@ The pruner runs at startup and then hourly. It only removes `YYYY-MM-DD`
 folders; it skips a day that was modified in the last hour and, when cloud
 sync is configured, any day that still has chunks that were not uploaded yet.
 
+Every store below is the same S3-API adapter; `s3`, `r2` and `minio` only fill in its
+settings differently. Anything that speaks the S3 API works through `[storage.s3]` with an
+`endpoint`, so there is no separate section per provider.
+
 ### `[storage.s3]`
 
 ```toml
@@ -84,7 +88,23 @@ region = "us-east-1"
 prefix = "loghaven"        # optional
 access_key = "AKIA..."
 secret_key = "..."
+# endpoint = "https://s3.us-west-004.backblazeb2.com"   # another S3-compatible service; unset is AWS
+# path_style = false       # true puts the bucket in the URL path (host/bucket/key); self-hosted servers often need it
 ```
+
+Examples for `endpoint` (set `region` to the one the provider names; it is used for request signing):
+
+| Service | `endpoint` | `path_style` |
+|---------|------------|--------------|
+| Backblaze B2 | `https://s3.<region>.backblazeb2.com` | `false` |
+| Wasabi | `https://s3.<region>.wasabisys.com` | `false` |
+| DigitalOcean Spaces | `https://<region>.digitaloceanspaces.com` | `false` |
+| Google Cloud Storage (interoperability, HMAC keys) | `https://storage.googleapis.com` | `false` |
+| Ceph RGW, SeaweedFS, Garage | your server's URL | usually `true` |
+
+None of these named services was tried; the adapter was run against AWS-style, path-style and prefixed settings with a local S3 server. Report any service that needs another setting.
+
+Stores that do not speak the S3 API (Azure Blob Storage, Google Cloud Storage's native API, SFTP) are not supported yet. The upload code sits behind a small `ObjectStore` trait, so one is a new implementation of that trait plus a config section.
 
 ### `[storage.r2]` (Cloudflare R2)
 
@@ -111,6 +131,9 @@ endpoint = "http://localhost:9000"
 bucket = "loghaven"
 access_key = "minioadmin"
 secret_key = "minioadmin"
+# region = "us-east-1"     # optional, this is the default
+# prefix = "loghaven"      # optional
+# path_style = true        # optional, true is the default
 ```
 
 Credentials are stored in plain text in the config file. Keep the file

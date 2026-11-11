@@ -16,7 +16,7 @@ pub use record::LogRecord;
 
 use crate::config::Config;
 use crate::error::{LogHavenError, Result};
-use cloud::{CloudSyncer, Target};
+use cloud::{CloudSyncer, S3Settings, Target};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -144,87 +144,95 @@ fn resolve_syncer(config: &Config) -> Result<Option<std::sync::Arc<CloudSyncer>>
 
 /// The named store, which must be fully configured.
 fn required_target(config: &Config, kind: &str) -> Result<Target> {
+    Ok(Target::s3_compatible(s3_settings(config, kind)?))
+}
+
+/// `s3`, `r2` and `minio` are three ways to fill in the same adapter.
+fn s3_settings(config: &Config, kind: &str) -> Result<S3Settings> {
+    let missing = |section: &str| {
+        LogHavenError::Config(format!(
+            "{kind} is used but there is no [storage.{section}] config"
+        ))
+    };
     match kind {
         "s3" => {
-            let s3 = config.storage.s3.as_ref().ok_or_else(|| {
-                LogHavenError::Config(format!(
-                    "{kind} is used but there is no [storage.s3] config"
-                ))
-            })?;
-            Ok(Target::s3(
-                s3.bucket.clone(),
-                s3.region.clone(),
-                s3.prefix.clone(),
-                &required_key(&s3.access_key, "s3.access_key")?,
-                &required_key(&s3.secret_key, "s3.secret_key")?,
-            ))
+            let s3 = config.storage.s3.as_ref().ok_or_else(|| missing("s3"))?;
+            Ok(S3Settings {
+                label: "s3".into(),
+                bucket: s3.bucket.clone(),
+                region: s3.region.clone(),
+                prefix: s3.prefix.clone(),
+                endpoint: s3.endpoint.clone(),
+                path_style: s3.path_style,
+                access_key: required_key(&s3.access_key, "s3.access_key")?,
+                secret_key: required_key(&s3.secret_key, "s3.secret_key")?,
+            })
         }
         "r2" => {
-            let r2 = config.storage.r2.as_ref().ok_or_else(|| {
-                LogHavenError::Config(format!(
-                    "{kind} is used but there is no [storage.r2] config"
-                ))
-            })?;
-            Ok(Target::r2(
-                r2.bucket.clone(),
-                r2.account_id.clone(),
-                r2.prefix.clone(),
-                &required_key(&r2.access_key, "r2.access_key")?,
-                &required_key(&r2.secret_key, "r2.secret_key")?,
-            ))
+            let r2 = config.storage.r2.as_ref().ok_or_else(|| missing("r2"))?;
+            Ok(S3Settings {
+                label: "r2".into(),
+                bucket: r2.bucket.clone(),
+                region: "auto".into(),
+                prefix: r2.prefix.clone(),
+                endpoint: Some(format!(
+                    "https://{}.r2.cloudflarestorage.com",
+                    r2.account_id
+                )),
+                path_style: false,
+                access_key: required_key(&r2.access_key, "r2.access_key")?,
+                secret_key: required_key(&r2.secret_key, "r2.secret_key")?,
+            })
         }
-        _ => {
-            let m = config.storage.minio.as_ref().ok_or_else(|| {
-                LogHavenError::Config(format!(
-                    "{kind} is used but there is no [storage.minio] config"
-                ))
-            })?;
-            Ok(Target::minio(
-                m.bucket.clone(),
-                m.endpoint.clone(),
-                &m.access_key,
-                &m.secret_key,
-            ))
+        "minio" => {
+            let m = config
+                .storage
+                .minio
+                .as_ref()
+                .ok_or_else(|| missing("minio"))?;
+            Ok(S3Settings {
+                label: "minio".into(),
+                bucket: m.bucket.clone(),
+                region: m.region.clone().unwrap_or_else(|| "us-east-1".into()),
+                prefix: m.prefix.clone(),
+                endpoint: Some(m.endpoint.clone()),
+                path_style: m.path_style.unwrap_or(true),
+                access_key: m.access_key.clone(),
+                secret_key: m.secret_key.clone(),
+            })
         }
+        other => Err(LogHavenError::Config(format!("unknown store: {other}"))),
     }
 }
 
 /// The first of S3, R2 and MinIO that has credentials.
 fn auto_detect_target(config: &Config) -> Option<Target> {
-    if let Some(s3) = &config.storage.s3
-        && let (Some(key), Some(secret)) = (&s3.access_key, &s3.secret_key)
+    let has_keys = |a: &Option<String>, b: &Option<String>| a.is_some() && b.is_some();
+    let kind = if config
+        .storage
+        .s3
+        .as_ref()
+        .is_some_and(|s| has_keys(&s.access_key, &s.secret_key))
     {
-        return Some(Target::s3(
-            s3.bucket.clone(),
-            s3.region.clone(),
-            s3.prefix.clone(),
-            key,
-            secret,
-        ));
-    }
-    if let Some(r2) = &config.storage.r2
-        && let (Some(key), Some(secret)) = (&r2.access_key, &r2.secret_key)
+        "s3"
+    } else if config
+        .storage
+        .r2
+        .as_ref()
+        .is_some_and(|r| has_keys(&r.access_key, &r.secret_key))
     {
-        return Some(Target::r2(
-            r2.bucket.clone(),
-            r2.account_id.clone(),
-            r2.prefix.clone(),
-            key,
-            secret,
-        ));
-    }
-    if let Some(m) = &config.storage.minio
-        && !m.access_key.is_empty()
-        && !m.secret_key.is_empty()
+        "r2"
+    } else if config
+        .storage
+        .minio
+        .as_ref()
+        .is_some_and(|m| !m.access_key.is_empty() && !m.secret_key.is_empty())
     {
-        return Some(Target::minio(
-            m.bucket.clone(),
-            m.endpoint.clone(),
-            &m.access_key,
-            &m.secret_key,
-        ));
-    }
-    None
+        "minio"
+    } else {
+        return None;
+    };
+    required_target(config, kind).ok()
 }
 
 fn required_key(val: &Option<String>, field: &str) -> Result<String> {
@@ -261,6 +269,8 @@ mod tests {
             prefix: None,
             access_key: Some("k".into()),
             secret_key: Some("s".into()),
+            endpoint: None,
+            path_style: false,
         });
         if let Some(d) = delete {
             cfg.storage.delete_after_upload = d;
@@ -306,6 +316,9 @@ mod tests {
                 bucket: "b".into(),
                 access_key: "k".into(),
                 secret_key: "s".into(),
+                region: None,
+                prefix: None,
+                path_style: None,
             });
             assert_eq!(
                 resolve_syncer(&minio).unwrap().unwrap().delete_after_upload,
@@ -326,6 +339,9 @@ mod tests {
             bucket: "b".into(),
             access_key: "k".into(),
             secret_key: "s".into(),
+            region: None,
+            prefix: None,
+            path_style: None,
         });
         cfg
     }
@@ -382,5 +398,113 @@ mod tests {
                 .to_string()
                 .contains("needs a cloud backend")
         );
+    }
+
+    #[test]
+    fn the_three_store_kinds_are_the_same_adapter_with_different_settings() {
+        let mut cfg = two_stores("s3", None);
+        cfg.storage.r2 = Some(crate::config::R2StorageConfig {
+            account_id: "acct".into(),
+            bucket: "rb".into(),
+            prefix: Some("p".into()),
+            access_key: Some("k".into()),
+            secret_key: Some("s".into()),
+        });
+
+        let aws = s3_settings(&cfg, "s3").unwrap();
+        assert_eq!(
+            (aws.label.as_str(), aws.endpoint.as_deref(), aws.path_style),
+            ("s3", None, false)
+        );
+
+        let r2 = s3_settings(&cfg, "r2").unwrap();
+        assert_eq!(r2.label, "r2");
+        assert_eq!(
+            r2.endpoint.as_deref(),
+            Some("https://acct.r2.cloudflarestorage.com")
+        );
+        assert_eq!(
+            (r2.region.as_str(), r2.path_style, r2.prefix.as_deref()),
+            ("auto", false, Some("p"))
+        );
+
+        let minio = s3_settings(&cfg, "minio").unwrap();
+        assert_eq!(minio.label, "minio");
+        assert_eq!(minio.endpoint.as_deref(), Some("http://localhost:9000"));
+        assert_eq!(
+            (minio.region.as_str(), minio.path_style),
+            ("us-east-1", true)
+        );
+        assert!(s3_settings(&cfg, "gcs").is_err());
+    }
+
+    #[test]
+    fn any_s3_compatible_service_is_an_s3_section_with_an_endpoint() {
+        let mut cfg = two_stores("s3", None);
+        let s3 = cfg.storage.s3.as_mut().unwrap();
+        s3.endpoint = Some("https://s3.us-west-004.backblazeb2.com".into());
+        s3.region = "us-west-004".into();
+        s3.path_style = true;
+        let got = s3_settings(&cfg, "s3").unwrap();
+        assert_eq!(
+            got.endpoint.as_deref(),
+            Some("https://s3.us-west-004.backblazeb2.com")
+        );
+        assert_eq!((got.region.as_str(), got.path_style), ("us-west-004", true));
+        assert_eq!(labels(&cfg).unwrap(), ["s3"]);
+    }
+
+    #[test]
+    fn minio_settings_can_be_overridden() {
+        let mut cfg = two_stores("minio", None);
+        let m = cfg.storage.minio.as_mut().unwrap();
+        m.region = Some("eu-west-1".into());
+        m.path_style = Some(false);
+        m.prefix = Some("logs".into());
+        let got = s3_settings(&cfg, "minio").unwrap();
+        assert_eq!(
+            (got.region.as_str(), got.path_style, got.prefix.as_deref()),
+            ("eu-west-1", false, Some("logs"))
+        );
+    }
+
+    #[test]
+    fn an_s3_section_from_a_config_file_without_the_new_keys_still_parses() {
+        let cfg: Config = toml::from_str(
+            "[storage]\nbackend = \"s3\"\n[storage.s3]\nbucket = \"b\"\nregion = \"us-east-1\"\naccess_key = \"k\"\nsecret_key = \"s\"\n[storage.minio]\nendpoint = \"http://h:9000\"\nbucket = \"b\"\naccess_key = \"k\"\nsecret_key = \"s\"\n",
+        )
+        .unwrap();
+        let s3 = cfg.storage.s3.unwrap();
+        assert!(s3.endpoint.is_none() && !s3.path_style);
+        assert!(cfg.storage.minio.unwrap().path_style.is_none());
+    }
+
+    #[test]
+    fn a_bad_endpoint_is_a_config_error_that_never_prints_the_url() {
+        for bad in [
+            "",
+            "localhost:9000",
+            "ftp://user:SECRETKEY@h",
+            "http://",
+            "https://",
+        ] {
+            let mut cfg = two_stores("s3", None);
+            cfg.storage.s3.as_mut().unwrap().endpoint = Some(bad.into());
+            let e = cfg.validate().unwrap_err().to_string();
+            assert!(
+                e.contains("storage.s3.endpoint") && !e.contains("SECRETKEY"),
+                "{bad:?}: {e}"
+            );
+            let mut cfg = two_stores("minio", None);
+            cfg.storage.minio.as_mut().unwrap().endpoint = bad.into();
+            let e = cfg.validate().unwrap_err().to_string();
+            assert!(
+                e.contains("storage.minio.endpoint") && !e.contains("SECRETKEY"),
+                "{bad:?}: {e}"
+            );
+        }
+        let mut cfg = two_stores("s3", None);
+        cfg.storage.s3.as_mut().unwrap().endpoint = Some("https://s3.example.com".into());
+        cfg.validate().unwrap();
     }
 }

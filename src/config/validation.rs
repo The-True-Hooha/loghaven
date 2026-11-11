@@ -76,6 +76,17 @@ fn validate_local_storage(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// The URL itself is never printed: it may hold credentials.
+fn check_endpoint(what: &str, url: &str) -> Result<()> {
+    if (url.starts_with("http://") || url.starts_with("https://")) && url.len() > 8 {
+        Ok(())
+    } else {
+        Err(LogHavenError::Config(format!(
+            "{what} must be an http:// or https:// URL"
+        )))
+    }
+}
+
 fn validate_s3_storage(config: &Config) -> Result<()> {
     let s3 = config.storage.s3.as_ref().ok_or_else(|| {
         LogHavenError::Config("S3 backend selected but no [storage.s3] config provided".into())
@@ -84,6 +95,9 @@ fn validate_s3_storage(config: &Config) -> Result<()> {
         return Err(LogHavenError::Config(
             "S3 config requires access_key and secret_key".into(),
         ));
+    }
+    if let Some(endpoint) = &s3.endpoint {
+        check_endpoint("storage.s3.endpoint", endpoint)?;
     }
     Ok(())
 }
@@ -111,6 +125,7 @@ fn validate_minio_storage(config: &Config) -> Result<()> {
             "MinIO config requires access_key and secret_key".into(),
         ));
     }
+    check_endpoint("storage.minio.endpoint", &minio.endpoint)?;
     Ok(())
 }
 

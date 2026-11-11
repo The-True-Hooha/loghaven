@@ -127,6 +127,14 @@ pub struct S3StorageConfig {
     pub prefix: Option<String>,
     pub access_key: Option<String>,
     pub secret_key: Option<String>,
+    /// Another service that speaks the S3 API (Backblaze B2, Wasabi, DigitalOcean Spaces, Ceph,
+    /// Google Cloud Storage's interoperability endpoint, ...). Unset means AWS.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Address the bucket in the URL path (`host/bucket/key`) instead of the host name. Most
+    /// self-hosted servers need this; AWS and hosted services do not.
+    #[serde(default)]
+    pub path_style: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +152,14 @@ pub struct MinioStorageConfig {
     pub bucket: String,
     pub access_key: String,
     pub secret_key: String,
+    /// Default `us-east-1`, which MinIO accepts.
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// Default true, which MinIO needs.
+    #[serde(default)]
+    pub path_style: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
