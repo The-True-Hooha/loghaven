@@ -126,6 +126,7 @@ impl Target {
 /// Anything else is retried on the next run.
 pub struct CloudSyncer {
     targets: Vec<Target>,
+    encryptor: Option<crate::storage::crypt::Encryptor>,
     data_path: PathBuf,
     pub delete_after_upload: bool,
 }
@@ -153,6 +154,23 @@ impl CloudSyncer {
         assert!(!targets.is_empty(), "a syncer needs a target");
         Arc::new(Self {
             targets,
+            encryptor: None,
+            data_path,
+            delete_after_upload,
+        })
+    }
+
+    /// Like `with_targets`, and every upload is encrypted first.
+    pub fn with_encryption(
+        targets: Vec<Target>,
+        data_path: PathBuf,
+        delete_after_upload: bool,
+        encryptor: crate::storage::crypt::Encryptor,
+    ) -> Arc<Self> {
+        assert!(!targets.is_empty(), "a syncer needs a target");
+        Arc::new(Self {
+            targets,
+            encryptor: Some(encryptor),
             data_path,
             delete_after_upload,
         })
@@ -168,19 +186,35 @@ impl CloudSyncer {
     /// returned and the chunk stays unsynced.
     pub async fn upload_chunk(&self, chunk_path: &Path) -> Result<()> {
         let several = self.targets.len() > 1;
+        // encrypted once, next to the chunk, and removed whatever the outcome
+        let sealed = match &self.encryptor {
+            Some(enc) => {
+                let tmp = chunk_path.with_extension("parquet.enc.tmp");
+                std::fs::write(&tmp, enc.encrypt(&std::fs::read(chunk_path)?)?)?;
+                Some(tmp)
+            }
+            None => None,
+        };
+        let source = sealed.as_deref().unwrap_or(chunk_path);
         let mut failed = None;
         for t in &self.targets {
             if several && partial_marker(chunk_path, &t.label).exists() {
                 continue;
             }
-            let key = t.key_for(&self.data_path, chunk_path)?;
-            match t.store.put(&key, chunk_path).await {
+            let mut key = t.key_for(&self.data_path, chunk_path)?;
+            if sealed.is_some() {
+                key.push_str(crate::storage::crypt::OBJECT_SUFFIX);
+            }
+            match t.store.put(&key, source).await {
                 Ok(()) if several => std::fs::write(partial_marker(chunk_path, &t.label), b"")?,
                 Ok(()) => {}
                 Err(e) => {
                     failed.get_or_insert(e);
                 }
             }
+        }
+        if let Some(tmp) = &sealed {
+            let _ = std::fs::remove_file(tmp);
         }
         if let Some(e) = failed {
             return Err(e);
@@ -313,6 +347,7 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::MockStore;
     use super::*;
+    use std::sync::Mutex;
 
     fn setup(
         name: &str,
@@ -544,5 +579,80 @@ mod tests {
         assert_eq!(s.sync_app(&tmp.join("web")).await, 0);
         assert_eq!(second.puts.lock().unwrap().len(), 1, "not uploaded again");
         assert!(marker_path(&a).exists());
+    }
+
+    #[tokio::test]
+    async fn encrypted_uploads_carry_ciphertext_under_an_enc_key_and_leave_the_local_chunk() {
+        let tmp = std::env::temp_dir().join(format!("lh-enc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let seen = Arc::new(CaptureStore::default());
+        let enc = crate::storage::crypt::Encryptor::load(&tmp.join("k"), true).unwrap();
+        let s = CloudSyncer::with_encryption(
+            vec![Target::new("s3", Box::new(seen.clone()), Some("p".into()))],
+            tmp.clone(),
+            false,
+            enc,
+        );
+        let a = chunk(&tmp, "web", "2024-01-01", "1-1.parquet");
+        std::fs::write(&a, b"PAR1 secret rows").unwrap();
+        assert_eq!(s.sync_app(&tmp.join("web")).await, 0);
+
+        let (key, body) = seen.0.lock().unwrap()[0].clone();
+        assert_eq!(key, "p/web/2024-01-01/1-1.parquet.enc");
+        assert!(!body.windows(6).any(|w| w == b"secret"));
+        let enc = crate::storage::crypt::Encryptor::load(&tmp.join("k"), false).unwrap();
+        assert_eq!(enc.decrypt(&body).unwrap(), b"PAR1 secret rows");
+        assert_eq!(
+            std::fs::read(&a).unwrap(),
+            b"PAR1 secret rows",
+            "local copy stays plain"
+        );
+        assert!(marker_path(&a).exists());
+        let left: Vec<_> = std::fs::read_dir(a.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .collect();
+        assert!(
+            left.iter()
+                .all(|f| !f.file_name().to_string_lossy().contains(".enc"))
+        );
+    }
+
+    #[derive(Default)]
+    struct CaptureStore(Mutex<Vec<(String, Vec<u8>)>>);
+
+    impl ObjectStore for Arc<CaptureStore> {
+        fn put<'a>(&'a self, key: &'a str, file: &'a Path) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((key.to_string(), std::fs::read(file)?));
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_temporary_encrypted_file_is_removed_after_a_failed_upload_too() {
+        let tmp = std::env::temp_dir().join(format!("lh-enc2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let store = Arc::new(MockStore::default());
+        store
+            .fail_all
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let enc = crate::storage::crypt::Encryptor::load(&tmp.join("k"), true).unwrap();
+        let s = CloudSyncer::with_encryption(
+            vec![Target::new("s3", Box::new(store), None)],
+            tmp.clone(),
+            false,
+            enc,
+        );
+        let a = chunk(&tmp, "web", "2024-01-01", "1-1.parquet");
+        assert_eq!(s.sync_app(&tmp.join("web")).await, 1);
+        assert!(!marker_path(&a).exists());
+        assert_eq!(std::fs::read_dir(a.parent().unwrap()).unwrap().count(), 1);
     }
 }

@@ -81,6 +81,11 @@ pub struct StorageConfig {
     #[serde(default)]
     pub delete_after_upload: bool,
 
+    /// Encrypt chunks with AES-256-GCM before they are uploaded. The key is created in
+    /// `keys_dir/storage.key` on first use. Local chunks stay readable by queries.
+    #[serde(default)]
+    pub encrypt_uploads: bool,
+
     #[serde(default)]
     pub local: LocalStorageConfig,
 
@@ -255,6 +260,7 @@ impl Default for StorageConfig {
             primary: "local".to_string(),
             secondary: None,
             delete_after_upload: false,
+            encrypt_uploads: false,
             local: LocalStorageConfig::default(),
             s3: None,
             r2: None,

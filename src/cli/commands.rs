@@ -731,6 +731,32 @@ pub fn dashboard(app: String, ttl_secs: u64, no_open: bool, profile: Option<&str
     Ok(())
 }
 
+pub fn storage_decrypt(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    profile: Option<&str>,
+) -> Result<()> {
+    let cfg = Config::load(&config::get_config_path(profile))?;
+    let key = crate::storage::storage_key_path(&cfg);
+    let enc = crate::storage::crypt::Encryptor::load(&key, false)?;
+    let plain = enc.decrypt(&std::fs::read(input)?)?;
+    // never over the input, and never over a file that is already there
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)
+        .map_err(|e| {
+            crate::error::LogHavenError::Config(format!("cannot create {}: {e}", output.display()))
+        })?;
+    std::io::Write::write_all(&mut out, &plain)?;
+    style::success(&format!(
+        "Wrote {} bytes to {}",
+        plain.len(),
+        output.display()
+    ));
+    Ok(())
+}
+
 pub fn auth_token(app: String, ttl_secs: u64, profile: Option<&str>) -> Result<()> {
     if ttl_secs == 0 || ttl_secs > MAX_TOKEN_TTL_SECS {
         return Err(crate::error::LogHavenError::Config(format!(

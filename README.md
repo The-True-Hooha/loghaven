@@ -310,7 +310,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 
 ### Phase 4 - Production hardening
 
-- Client-side encryption
+- Done: client-side encryption of cloud uploads (`encrypt_uploads`). Local chunks and the UDP wire format are not encrypted.
 - Done: multiple simultaneous storage backends (`secondary` store, uploaded alongside the main one)
 - Done: persistent sessions across restarts
 - Column projection in queries, dedicated writer threads
