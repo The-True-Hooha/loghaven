@@ -238,3 +238,7 @@ loghaven dashboard --app web
 | `loghaven dashboard --app Bad/App` | error: invalid app name, no browser |
 
 Scripted version, in a real browser engine: `node scripts/dashboard_e2e.js "$(loghaven dashboard --app web --no-open)"` runs the table above in headless Chromium (see the header of the script for the seed records and `playwright` setup). It also checks the Content-Security-Policy, that no token is left in the address bar, storage or a Referer header, the phone-width layout and the dark theme.
+
+## Automated end to end
+
+`scripts/e2e.sh [binary]` runs the checks that need a live daemon in an isolated `HOME`: sessions across `stop`, `run` and `kill -9`; a foreign `Host`; the dashboard in headless Chromium (`scripts/dashboard_e2e.js`); the terminal UI in a pseudo-terminal (`scripts/tui_e2e.py`); and the Ethereum, Solana and Stellar adapters against the fake nodes in `scripts/`, including `backfill` and following new transactions. CI runs it as the `End to end` job. Locally it needs `python3`, `curl` and `playwright` (`npm i playwright && npx playwright install chromium`).
