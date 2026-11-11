@@ -44,8 +44,11 @@ on any command to read `NAME.toml` instead of `config.toml`.
 | Key | Default | Notes |
 |-----|---------|-------|
 | `backend` | `"auto"` | `local`: never upload. `s3` / `r2` / `minio`: upload to that store (its section and credentials are required, or startup fails). `auto`: upload to the first of S3, R2, MinIO that has credentials configured, otherwise stay local. Override with `LOGHAVEN_STORAGE_BACKEND`. |
-| `delete_after_upload` | `false` | `true` removes a chunk from local disk once it is uploaded. Queries only read local chunks, so deleted chunks are no longer searchable. Switching this on later does not delete chunks that were already uploaded. |
-| `primary`, `secondary` | `"local"`, unset | Reserved for multiple simultaneous backends (Phase 4). Currently unused. |
+| `delete_after_upload` | `false` | `true` removes a chunk from local disk once it is uploaded (with a `secondary`, once it is in both stores). Queries only read local chunks, so deleted chunks are no longer searchable. Switching this on later does not delete chunks that were already uploaded. |
+| `secondary` | unset | A second store (`s3`, `r2` or `minio`) that every chunk is uploaded to as well as to the one `backend` selects, each under its own prefix. It must be a different store from the first, fully configured, and needs a cloud `backend` (not `local`); otherwise startup fails. Local disk stays the copy that queries read. |
+| `primary` | `"local"` | Unused; local disk is always the primary copy. |
+
+With a `secondary`, a chunk counts as uploaded once both stores have it. If one store is down, the other still gets the chunk, the chunk stays local and unsynced (and is never pruned or deleted), and each retry uploads only to the store that is missing it; `<chunk>.parquet.synced-<store>` marks the stores that are done. A `secondary` applies to chunks written after it was enabled: chunks already marked as synced to the first store are not copied to it.
 
 Cloud sync works per finished chunk: after each flush, every chunk without a
 `.synced` marker is uploaded; failures are retried on the next flush and on
