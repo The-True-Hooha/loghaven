@@ -33,7 +33,24 @@ impl Daemon {
             StorageRouter::new(&self.config).map_err(|e| LogHavenError::Storage(e.to_string()))?,
         );
 
-        let sessions = Arc::new(SessionStore::new(self.config.auth.session_ttl_secs));
+        let sessions = Arc::new(SessionStore::persistent(
+            self.config.auth.session_ttl_secs,
+            self.config.auth.keys_dir.join("sessions.json"),
+        )?);
+
+        // Counters move with every datagram, so changes are written once a second
+        {
+            let sessions = Arc::clone(&sessions);
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(1));
+                loop {
+                    ticker.tick().await;
+                    if let Err(e) = sessions.flush() {
+                        eprintln!("Could not save sessions: {e}");
+                    }
+                }
+            });
+        }
 
         // Purge expired sessions hourly
         {
@@ -108,6 +125,9 @@ impl Daemon {
             }
         }
 
+        if let Err(e) = sessions.flush() {
+            eprintln!("Could not save sessions: {e}");
+        }
         storage.shutdown_all().await?;
         Ok(())
     }

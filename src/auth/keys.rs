@@ -36,7 +36,7 @@ pub fn generate_keypair(private_path: &Path, public_path: &Path) -> Result<()> {
 
 /// Creates the file with mode 0600 from the start, so the key is never
 /// readable by others, not even briefly.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(super) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
