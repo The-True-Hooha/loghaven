@@ -731,6 +731,95 @@ pub fn dashboard(app: String, ttl_secs: u64, no_open: bool, profile: Option<&str
     Ok(())
 }
 
+/// `app/date/chunk.parquet`: what a chunk is named inside a store, and what its encryption is
+/// bound to. Anything else would only produce a misleading "damaged file" later.
+fn valid_chunk_name(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('/').collect();
+    let [app, date, file] = parts.as_slice() else {
+        return false;
+    };
+    crate::storage::validate_app_name(app).is_ok()
+        && crate::storage::date::parse_date(date).is_some()
+        && file.ends_with(".parquet")
+        && file.len() > ".parquet".len()
+        && !file.contains(['\\', ':'])
+}
+
+/// The name from the last three parts of a downloaded object's path.
+fn chunk_name_of(input: &std::path::Path) -> Option<String> {
+    let parts: Vec<String> = input
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(p) => p.to_str().map(String::from),
+            _ => None,
+        })
+        .collect();
+    let [.., app, date, file] = parts.as_slice() else {
+        return None;
+    };
+    let name = format!(
+        "{app}/{date}/{}",
+        file.strip_suffix(crate::storage::crypt::OBJECT_SUFFIX)?
+    );
+    valid_chunk_name(&name).then_some(name)
+}
+
+/// Creates `path` (never over an existing file) with mode 0600 and writes `bytes`; a failed
+/// write leaves nothing behind.
+fn write_private_new(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    crate::storage::crypt::write_new_private(path, bytes).map_err(|e| {
+        // only a file this call made is cleaned up; an existing one is the user's
+        let existed = matches!(&e, crate::error::LogHavenError::Io(io)
+            if io.kind() == std::io::ErrorKind::AlreadyExists);
+        if !existed {
+            let _ = std::fs::remove_file(path);
+        }
+        crate::error::LogHavenError::Config(format!("cannot write {}: {e}", path.display()))
+    })
+}
+
+pub fn storage_decrypt(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    name: Option<String>,
+    profile: Option<&str>,
+) -> Result<()> {
+    let name = match name {
+        Some(n) if valid_chunk_name(&n) => n,
+        Some(n) => {
+            return Err(crate::error::LogHavenError::Config(format!(
+                "--name '{n}' is not <app>/<date>/<chunk>.parquet"
+            )));
+        }
+        None => chunk_name_of(input).ok_or_else(|| {
+            crate::error::LogHavenError::Config(format!(
+                "cannot tell the chunk's name from '{}'; pass --name <app>/<date>/<chunk>.parquet",
+                input.display()
+            ))
+        })?,
+    };
+    let cfg = Config::load(&config::get_config_path(profile))?;
+    let keys = crate::storage::crypt::Encryptor::all(&cfg.auth.keys_dir)?;
+    let plain = crate::storage::crypt::decrypt_with(&keys, &name, &std::fs::read(input)?)?;
+    write_private_new(output, &plain)?;
+    style::success(&format!(
+        "Wrote {} bytes to {}",
+        plain.len(),
+        output.display()
+    ));
+    Ok(())
+}
+
+pub fn storage_rotate_key(profile: Option<&str>) -> Result<()> {
+    let cfg = Config::load(&config::get_config_path(profile))?;
+    let (old, new) = crate::storage::crypt::Encryptor::rotate(&cfg.auth.keys_dir)?;
+    style::success(&format!(
+        "New upload key {new}; the old key {old} is kept for reading"
+    ));
+    style::info("Restart the daemon so it uses the new key. Back up both key files.");
+    Ok(())
+}
+
 pub fn auth_token(app: String, ttl_secs: u64, profile: Option<&str>) -> Result<()> {
     if ttl_secs == 0 || ttl_secs > MAX_TOKEN_TTL_SECS {
         return Err(crate::error::LogHavenError::Config(format!(
@@ -798,6 +887,27 @@ pub fn auth_public_key(profile: Option<&str>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chunk_name_comes_from_the_last_three_parts_of_a_downloaded_object() {
+        use std::path::Path;
+        let f = |p: &str| super::chunk_name_of(Path::new(p));
+        assert_eq!(
+            f("/dl/logs/web/2026-11-11/1-1.parquet.enc").as_deref(),
+            Some("web/2026-11-11/1-1.parquet")
+        );
+        assert_eq!(
+            f("web/2026-11-11/1-1.parquet.enc").as_deref(),
+            Some("web/2026-11-11/1-1.parquet")
+        );
+        assert_eq!(f("1-1.parquet.enc"), None);
+        assert_eq!(f("./2026-11-11/1-1.parquet.enc"), None);
+        assert_eq!(f("/2026-11-11/1-1.parquet.enc"), None);
+        assert_eq!(f("/dl/web/2026-11-11/.parquet.enc"), None);
+        assert_eq!(f("/dl/web/2026-11-11/x.txt.enc"), None);
+        assert_eq!(f("/dl/web/notadate/1-1.parquet.enc"), None);
+        assert_eq!(f("/dl/web/2026-11-11/1-1.parquet"), None);
+    }
+
     #[test]
     fn dashboard_url_keeps_the_token_in_the_fragment() {
         let url = super::dashboard_url(9200, "web", Some("abc123"), 15000);
@@ -872,5 +982,40 @@ mod tests {
         };
         assert_eq!(ids(merge_trace(input(), 10)), ["m", "z", "a", "b"]);
         assert_eq!(ids(merge_trace(input(), 2)), ["a", "b"]);
+    }
+
+    #[test]
+    fn an_explicit_chunk_name_must_have_the_three_parts() {
+        for ok in ["web/2026-11-11/1-1.parquet", "a-b/2024-01-01/x.parquet"] {
+            assert!(super::valid_chunk_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "web",
+            "web/2026-11-11",
+            "web/2026-11-11/x",
+            "../2026-11-11/x.parquet",
+            "web/2026-13-40/x.parquet",
+            "web/2026-11-11/a/b.parquet",
+            "web/2026-11-11/.parquet",
+            "Web/2026-11-11/x.parquet",
+        ] {
+            assert!(!super::valid_chunk_name(bad), "{bad}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn decrypted_output_is_private_and_never_replaces_a_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("chunk.parquet");
+        super::write_private_new(&out, b"rows").unwrap();
+        assert_eq!(
+            std::fs::metadata(&out).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(super::write_private_new(&out, b"other").is_err());
+        assert_eq!(std::fs::read(&out).unwrap(), b"rows");
     }
 }

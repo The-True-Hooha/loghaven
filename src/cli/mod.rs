@@ -267,10 +267,53 @@ pub enum Commands {
         profile: Option<String>,
     },
 
+    #[command(about = "Work with stored chunks")]
+    Storage {
+        #[command(subcommand)]
+        command: StorageCommands,
+    },
+
     #[command(about = "Manage authentication keys and session tokens")]
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum StorageCommands {
+    #[command(
+        about = "Decrypt a chunk downloaded from a cloud store (uploaded with encrypt_uploads)"
+    )]
+    Decrypt {
+        #[arg(value_name = "FILE")]
+        input: std::path::PathBuf,
+
+        #[arg(
+            long,
+            short,
+            value_name = "FILE",
+            help = "Where to write the Parquet chunk"
+        )]
+        output: std::path::PathBuf,
+
+        #[arg(
+            long,
+            value_name = "APP/DATE/CHUNK.parquet",
+            help = "The chunk's name in the store without prefix or .enc; by default the last three parts of FILE"
+        )]
+        name: Option<String>,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+
+    #[command(
+        about = "Archive the upload key as storage.key.<id> and make a new one; old uploads stay readable"
+    )]
+    RotateKey {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
     },
 }
 
@@ -396,6 +439,17 @@ pub fn execute(cli: Cli) -> crate::error::Result<()> {
             trace_id,
             profile.as_deref(),
         ),
+        Some(Commands::Storage { command }) => match command {
+            StorageCommands::Decrypt {
+                input,
+                output,
+                name,
+                profile,
+            } => commands::storage_decrypt(&input, &output, name, profile.as_deref()),
+            StorageCommands::RotateKey { profile } => {
+                commands::storage_rotate_key(profile.as_deref())
+            }
+        },
         Some(Commands::Auth { command }) => match command {
             AuthCommands::Keygen { force, profile } => {
                 commands::auth_keygen(force, profile.as_deref())

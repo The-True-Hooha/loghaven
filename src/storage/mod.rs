@@ -1,5 +1,6 @@
 mod app_name;
 pub mod cloud;
+pub mod crypt;
 pub mod date;
 pub mod local;
 pub mod pruner;
@@ -128,11 +129,17 @@ fn resolve_syncer(config: &Config) -> Result<Option<std::sync::Arc<CloudSyncer>>
     if targets.is_empty() {
         return Ok(None);
     }
-    Ok(Some(CloudSyncer::with_targets(
-        targets,
+    let (data_path, delete) = (
         config.storage.local.path.clone(),
         config.storage.delete_after_upload,
-    )))
+    );
+    if config.storage.encrypt_uploads {
+        let encryptor = crypt::Encryptor::current(&config.auth.keys_dir)?;
+        return Ok(Some(CloudSyncer::with_encryption(
+            targets, data_path, delete, encryptor,
+        )));
+    }
+    Ok(Some(CloudSyncer::with_targets(targets, data_path, delete)))
 }
 
 /// The named store, which must be fully configured.
