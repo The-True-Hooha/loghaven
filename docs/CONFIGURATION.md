@@ -181,8 +181,9 @@ How it behaves:
   subscription with "method not found" is not asked again until the watcher
   restarts; any other refusal (a rate limit) is retried. The socket is read only
   while waiting, so a node that drops quiet clients can cause a reconnect each
-  cycle. Messages over 1 MiB are refused. The URL is never printed in errors. `wss://` uses the built-in root certificates; it has not been tried
-  against a public node. Plain HTTP polling has been run against a public Ethereum node.
+  cycle. Messages over 1 MiB are refused. The URL is never printed in errors. `wss://` uses the built-in root certificates and has been run against a public
+  node (`wss://ethereum-rpc.publicnode.com`): with a 60 second `poll_interval_secs`, polls
+  followed the 12 second block time.
 - If your node rejects a range because it holds too many logs, lower
   `max_block_range`.
 - The RPC URL is never printed in errors, because it often contains an API key.

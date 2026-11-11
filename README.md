@@ -11,7 +11,7 @@
 
 A local-first, composable, chain-aware observability runtime for on-chain and off-chain systems.
 
-> **Status: pre-1.0.** Phases 0 (foundation), 1 (usable end to end), 2 (chain awareness) and 3 (interfaces) are done: transaction tracing and Ethereum, Solana and Stellar adapters are in v0.3. Phase 3 (interfaces) is done too: the terminal UI and the web dashboard are in v0.4. The adapters have been run against public Ethereum, Solana and Stellar nodes over HTTP, and against local and fake nodes; `wss://` has not been tried on a public node. See the [roadmap](#roadmap).
+> **Status: pre-1.0.** Phases 0 (foundation), 1 (usable end to end), 2 (chain awareness) and 3 (interfaces) are done: transaction tracing and Ethereum, Solana and Stellar adapters are in v0.3. Phase 3 (interfaces) is done too: the terminal UI and the web dashboard are in v0.4. The adapters have been run against public Ethereum, Solana and Stellar nodes over HTTP, and against local and fake nodes; `wss://` block notifications were run against a public Ethereum node. The dashboard was run in headless Chromium. See the [roadmap](#roadmap).
 
 ## What it is
 
