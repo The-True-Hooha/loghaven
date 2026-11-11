@@ -297,6 +297,21 @@ pub enum StorageCommands {
         )]
         output: std::path::PathBuf,
 
+        #[arg(
+            long,
+            value_name = "APP/DATE/CHUNK.parquet",
+            help = "The chunk's name in the store without prefix or .enc; by default the last three parts of FILE"
+        )]
+        name: Option<String>,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+
+    #[command(
+        about = "Archive the upload key as storage.key.<id> and make a new one; old uploads stay readable"
+    )]
+    RotateKey {
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
     },
@@ -428,8 +443,12 @@ pub fn execute(cli: Cli) -> crate::error::Result<()> {
             StorageCommands::Decrypt {
                 input,
                 output,
+                name,
                 profile,
-            } => commands::storage_decrypt(&input, &output, profile.as_deref()),
+            } => commands::storage_decrypt(&input, &output, name, profile.as_deref()),
+            StorageCommands::RotateKey { profile } => {
+                commands::storage_rotate_key(profile.as_deref())
+            }
         },
         Some(Commands::Auth { command }) => match command {
             AuthCommands::Keygen { force, profile } => {

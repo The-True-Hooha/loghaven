@@ -92,11 +92,6 @@ impl StorageRouter {
     }
 }
 
-/// Where the key for `encrypt_uploads` lives.
-pub fn storage_key_path(config: &Config) -> std::path::PathBuf {
-    config.auth.keys_dir.join("storage.key")
-}
-
 fn resolve_syncer(config: &Config) -> Result<Option<std::sync::Arc<CloudSyncer>>> {
     let backend = config.storage.backend.as_str();
     let mut targets = vec![];
@@ -139,7 +134,7 @@ fn resolve_syncer(config: &Config) -> Result<Option<std::sync::Arc<CloudSyncer>>
         config.storage.delete_after_upload,
     );
     if config.storage.encrypt_uploads {
-        let encryptor = crypt::Encryptor::load(&storage_key_path(config), true)?;
+        let encryptor = crypt::Encryptor::current(&config.auth.keys_dir)?;
         return Ok(Some(CloudSyncer::with_encryption(
             targets, data_path, delete, encryptor,
         )));

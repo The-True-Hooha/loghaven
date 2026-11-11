@@ -102,9 +102,40 @@ pub fn remove_stale_tmp(app_dir: &Path) {
             continue;
         };
         for f in files.flatten() {
-            if f.file_name().to_string_lossy().ends_with(TMP_SUFFIX) {
+            let name = f.file_name().to_string_lossy().into_owned();
+            // `.parquet.enc.tmp` is the encrypted copy of an upload that was cut short
+            if name.ends_with(TMP_SUFFIX) || name.ends_with("parquet.enc.tmp") {
                 let _ = std::fs::remove_file(f.path());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_sweeps_unfinished_chunks_and_unfinished_encrypted_copies_only() {
+        let d = tempfile::tempdir().unwrap();
+        let day = d.path().join("2024-01-01");
+        std::fs::create_dir_all(&day).unwrap();
+        for f in [
+            "1-1.parquet.tmp",
+            "1-2.parquet.enc.tmp",
+            "1-3.parquet",
+            "1-3.parquet.synced",
+            "notes.txt",
+        ] {
+            std::fs::write(day.join(f), b"x").unwrap();
+        }
+        remove_stale_tmp(d.path());
+        let mut left: Vec<String> = std::fs::read_dir(&day)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["1-3.parquet", "1-3.parquet.synced", "notes.txt"]);
     }
 }

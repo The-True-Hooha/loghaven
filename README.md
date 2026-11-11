@@ -276,7 +276,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 | 1 - Usable end to end | Token CLI, client SDK, `send`, `logs --follow`, wire spec | **Done** (v0.2, see [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md)) |
 | 2 - Chain awareness | tx-hash correlation (`trace`), Ethereum, Solana and Stellar adapters | **Done** (v0.3): `trace` and the Ethereum adapter shipped in v0.2; the Solana and Stellar adapters and Ethereum WebSocket block notifications in v0.3. Run against public networks since v0.4 |
 | 3 - Interfaces | TUI, web dashboard | **Done** (v0.4): `loghaven tui` and `loghaven dashboard` |
-| 4 - Production hardening | Client-side encryption, multi-backend, persistent sessions, license | Planned |
+| 4 - Production hardening | Client-side encryption of uploads, multi-backend, persistent sessions, license | **Mostly done**: only the license is left |
 
 ### Phase 0 - Foundation (done)
 
@@ -310,7 +310,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 
 ### Phase 4 - Production hardening
 
-- Done: client-side encryption of cloud uploads (`encrypt_uploads`). Local chunks and the UDP wire format are not encrypted.
+- Done: client-side encryption of cloud uploads (`encrypt_uploads`, AES-256-GCM, bound to the chunk's name, key id and `rotate-key`). Local chunks and the UDP wire format are not encrypted.
 - Done: multiple simultaneous storage backends (`secondary` store, uploaded alongside the main one)
 - Done: persistent sessions across restarts
 - Column projection in queries, dedicated writer threads
