@@ -313,7 +313,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 - Client-side encryption
 - Multiple simultaneous storage backends (`primary` / `secondary`)
 - Persistent sessions across restarts
-- Column projection in queries, dedicated writer threads
+- Done: column projection in queries (a chunk is first read for the filter's columns only, then fully for the matching rows, and chunks older than the newest `limit` records are skipped). Chunk writes already run on blocking threads, off the async workers; no change there without a measured bottleneck.
 - Choose and publish a license
 
 Details of the completed hardening work are in [docs/HARDENING_PLAN.md](docs/HARDENING_PLAN.md).
