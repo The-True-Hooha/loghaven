@@ -19,6 +19,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Horizon's own maximum page size.
 const PAGE: usize = 200;
 const MAX_MEMO_CHARS: usize = 128;
+/// Horizon's largest page; a transaction holds at most 100 operations, so one page is all of them.
+const OPS_PAGE: usize = 200;
 
 struct Tx {
     hash: String,
@@ -137,7 +139,7 @@ async fn start_token(get: &impl Get, account: &str, backfill: usize) -> Result<O
         .transpose()
 }
 
-fn to_record(account: &str, tx: &Tx) -> ClientRecord {
+fn to_record(account: &str, tx: &Tx, ops: Option<&[String]>) -> ClientRecord {
     let outcome = if tx.successful { "ok" } else { "failed" };
     ClientRecord {
         level: if tx.successful { "info" } else { "error" }.into(),
@@ -155,9 +157,23 @@ fn to_record(account: &str, tx: &Tx) -> ClientRecord {
             "source_account": tx.source_account,
             "memo_type": tx.memo_type,
             "memo": tx.memo,
+            "operations": ops,
         })),
         ..Default::default()
     }
+}
+
+/// The operation types of one transaction, in order.
+async fn operation_types(get: &impl Get, hash: &str) -> Result<Vec<String>> {
+    let path = format!("/transactions/{hash}/operations?limit={OPS_PAGE}&include_failed=true");
+    let Some(reply) = get.get(&path).await? else {
+        return Ok(vec![]);
+    };
+    let records = reply
+        .pointer("/_embedded/records")
+        .and_then(Value::as_array)
+        .ok_or_else(|| LogHavenError::Daemon("horizon: reply has no records".into()))?;
+    Ok(records.iter().filter_map(|o| text(o, "type", 40)).collect())
 }
 
 pub struct Batch {
@@ -211,18 +227,42 @@ pub async fn poll(get: &impl Get, cfg: &StellarConfig, saved: Option<&Cursor>) -
     let mut records = vec![];
     let mut seen = BTreeSet::new();
     let mut more = false;
+    let mut throttled = None;
     for ((account, until, pending), count) in listed.iter().zip(counts) {
-        more |= count < pending.len();
         let take = &pending[..count];
-        for tx in take {
-            // a transaction touching several watched accounts is recorded once
-            if seen.insert(tx.hash.clone()) {
-                records.push(to_record(account, tx));
+        let mut done = 0;
+        if throttled.is_none() {
+            for tx in take {
+                // a transaction touching several watched accounts is recorded once
+                if seen.insert(tx.hash.clone()) {
+                    let ops = if cfg.operations {
+                        match operation_types(get, &tx.hash).await {
+                            Ok(types) => Some(types),
+                            Err(e @ LogHavenError::RateLimited(_)) => {
+                                seen.remove(&tx.hash);
+                                throttled = Some(e);
+                                break;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    } else {
+                        None
+                    };
+                    records.push(to_record(account, tx, ops.as_deref()));
+                }
+                done += 1;
             }
         }
-        if let Some(newest) = take.last().map(|t| t.token).or(*until) {
+        // after a rate limit the rest waits for the next poll, which starts after the interval
+        more |= throttled.is_none() && count < pending.len();
+        if let Some(newest) = take[..done].last().map(|t| t.token).or(*until) {
             last.insert((*account).clone(), newest);
         }
+    }
+    if let Some(e) = throttled
+        && records.is_empty()
+    {
+        return Err(e);
     }
     Ok(Batch {
         records,

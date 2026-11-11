@@ -289,6 +289,7 @@ accounts = ["G..."]             # account ids to watch (G + 55 characters); at l
 poll_interval_secs = 5          # wait between polls once caught up
 max_records = 100               # most transactions per account in one poll (1 to 1000)
 # backfill = 20                 # first run only: also record each account's newest 20 transactions (0 to 100)
+# operations = true             # also record each transaction's operation types (one more request each)
 ```
 
 Run it with `loghaven watch stellar` (the daemon must be running). It is a
@@ -310,6 +311,11 @@ How it behaves:
   from before. With `backfill = N` it starts N transactions earlier, so each account's
   newest N transactions are recorded first (at most `max_records` per poll). `backfill`
   is read only when there is no cursor.
+- With `operations = true`, each record's `metadata.operations` lists the operation types
+  in order (for example `["payment", "manage_data"]`); it is `null` when the setting is off.
+  This costs one more request per recorded transaction. A reply of HTTP 429 is handled as
+  for Solana: what was read is recorded, the cursor moves only that far, the rest waits for
+  the next poll.
 - The Horizon `paging_token` of the newest recorded transaction per account is
   kept in `stellar.cursor` next to `config.toml`: the first line is a fingerprint of
   the network passphrase and the account list, then one `<account> <token>` line

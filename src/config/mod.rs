@@ -216,6 +216,9 @@ pub struct StellarConfig {
     /// On the first run, record this many of each account's newest transactions instead of starting at the tip.
     #[serde(default)]
     pub backfill: u64,
+    /// Also record each transaction's operation types; costs one more Horizon request per transaction.
+    #[serde(default)]
+    pub operations: bool,
 }
 
 impl Default for AgentConfig {
