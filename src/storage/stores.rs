@@ -202,7 +202,8 @@ pub fn build(t: &StorageTarget) -> Result<Arc<dyn ObjectStore>> {
                 GoogleCloudStorageBuilder::from_env()
             }
             .with_bucket_name(bucket)
-            .with_client_options(client_options());
+            // only a service-account file can name a non-Google `gcs_base_url` (an emulator)
+            .with_client_options(client_options().with_allow_http(true));
             if let Some(path) = credentials_file {
                 b = b.with_service_account_path(path);
             }

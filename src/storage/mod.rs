@@ -72,6 +72,26 @@ impl StorageRouter {
         Ok(b)
     }
 
+    /// Opens every app already on disk so chunks left by a failed or interrupted upload are
+    /// retried now, not whenever that app next receives a record.
+    pub fn resume_uploads(&self) {
+        if self.cloud_syncer.is_none() {
+            return;
+        }
+        let Ok(apps) = std::fs::read_dir(&self.local_config.path) else {
+            return;
+        };
+        for entry in apps.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if entry.path().is_dir()
+                && validate_app_name(&name).is_ok()
+                && let Err(e) = self.get_or_create(&name)
+            {
+                eprintln!("Cannot resume uploads for {name}: {e}");
+            }
+        }
+    }
+
     pub fn has_cloud_sync(&self) -> bool {
         self.cloud_syncer.is_some()
     }
@@ -303,6 +323,28 @@ mod tests {
             assert!(matches!(r, Err(LogHavenError::InvalidApp(_))), "{app:?}");
         }
         assert!(!tmp.exists());
+    }
+
+    #[tokio::test]
+    async fn resume_opens_the_apps_on_disk_only_when_there_is_somewhere_to_upload() {
+        let tmp = tempfile::tempdir().unwrap();
+        for app in ["web", "api"] {
+            std::fs::create_dir_all(tmp.path().join(app)).unwrap();
+        }
+        std::fs::create_dir_all(tmp.path().join("Not An App")).unwrap();
+
+        let mut cfg = s3_config(None);
+        cfg.storage.local.path = tmp.path().to_path_buf();
+        let router = StorageRouter::new(&cfg).unwrap();
+        router.resume_uploads();
+        let mut open: Vec<String> = router.backends.lock().unwrap().keys().cloned().collect();
+        open.sort();
+        assert_eq!(open, ["api", "web"]);
+
+        cfg.storage.backend = "local".into();
+        let router = StorageRouter::new(&cfg).unwrap();
+        router.resume_uploads();
+        assert!(router.backends.lock().unwrap().is_empty());
     }
 
     fn s3_config(delete: Option<bool>) -> Config {

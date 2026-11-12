@@ -33,6 +33,8 @@ impl Daemon {
             StorageRouter::new(&self.config).map_err(|e| LogHavenError::Storage(e.to_string()))?,
         );
 
+        storage.resume_uploads();
+
         let sessions = Arc::new(SessionStore::persistent(
             self.config.auth.session_ttl_secs,
             self.config.auth.keys_dir.join("sessions.json"),
