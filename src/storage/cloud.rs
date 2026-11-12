@@ -906,6 +906,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gcs_puts_the_object_to_the_base_url_of_the_service_account_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (addr, seen) = fake_store().await;
+        let account = tmp.path().join("emulator.json");
+        std::fs::write(
+            &account,
+            format!(
+                r#"{{"gcs_base_url":"http://{addr}","disable_oauth":true,"client_email":"","private_key":"","private_key_id":""}}"#
+            ),
+        )
+        .unwrap();
+        let t = from_toml(&format!(
+            "name = \"g\"\ntype = \"gcs\"\nbucket = \"logs\"\ncredentials_file = \"{}\"\n",
+            account.display()
+        ));
+        upload_one(&t, tmp.path()).await.unwrap();
+        let s = seen.lock().unwrap().last().unwrap().clone();
+        assert_eq!(s.method, "PUT");
+        assert_eq!(s.path, "/logs/web%2F2024%2D01%2D01%2F1%2D1%2Eparquet");
+    }
+
+    #[tokio::test]
     async fn a_failing_store_gives_an_error_without_the_query_string() {
         let tmp = tempfile::tempdir().unwrap();
         let t = from_toml(
