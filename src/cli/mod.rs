@@ -308,6 +308,28 @@ pub enum StorageCommands {
         profile: Option<String>,
     },
 
+    #[command(about = "Copy an app's chunks back from a cloud store into the local data directory")]
+    Restore {
+        #[arg(value_name = "APP")]
+        app: String,
+
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "Which [[storage.targets]] entry to read; needed when there are several"
+        )]
+        target: Option<String>,
+
+        #[arg(long, value_name = "YYYY-MM-DD", help = "First day to restore")]
+        from: Option<String>,
+
+        #[arg(long, value_name = "YYYY-MM-DD", help = "Last day to restore")]
+        to: Option<String>,
+
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+
     #[command(
         about = "Archive the upload key as storage.key.<id> and make a new one; old uploads stay readable"
     )]
@@ -446,6 +468,13 @@ pub fn execute(cli: Cli) -> crate::error::Result<()> {
                 name,
                 profile,
             } => commands::storage_decrypt(&input, &output, name, profile.as_deref()),
+            StorageCommands::Restore {
+                app,
+                target,
+                from,
+                to,
+                profile,
+            } => commands::storage_restore(app, target, from, to, profile.as_deref()),
             StorageCommands::RotateKey { profile } => {
                 commands::storage_rotate_key(profile.as_deref())
             }

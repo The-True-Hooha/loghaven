@@ -16,6 +16,17 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// implementation of this trait plus a `TargetKind` variant.
 pub trait ObjectStore: Send + Sync {
     fn put<'a>(&'a self, key: &'a str, file: &'a Path) -> BoxFuture<'a, Result<()>>;
+
+    /// Keys of every object below `prefix`. Only `storage restore` reads, so a store that
+    /// cannot (a future SFTP one, say) may leave these as they are.
+    fn list<'a>(&'a self, _prefix: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
+        Box::pin(async { Err(LogHavenError::Storage("this store cannot be listed".into())) })
+    }
+
+    /// The object's bytes; an object larger than `max_bytes` is refused before it is read.
+    fn get<'a>(&'a self, _key: &'a str, _max_bytes: u64) -> BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(async { Err(LogHavenError::Storage("this store cannot be read".into())) })
+    }
 }
 
 /// A chunk this big or smaller goes up in one request; a larger one in parts, read from the file
@@ -31,7 +42,7 @@ fn upload_budget(bytes: u64) -> std::time::Duration {
 }
 
 /// `ObjectStore` over the `object_store` crate.
-struct CrateStore(Arc<dyn object_store::ObjectStore>);
+pub(crate) struct CrateStore(pub(crate) Arc<dyn object_store::ObjectStore>);
 
 impl CrateStore {
     async fn send(&self, path: &object_store::path::Path, file: &Path, len: u64) -> Result<()> {
@@ -87,6 +98,50 @@ impl ObjectStore for CrateStore {
                 .map_err(|_| LogHavenError::Storage("upload to cloud timed out".into()))?
         })
     }
+
+    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
+        Box::pin(async move {
+            use futures_util::TryStreamExt;
+            let path = parse_key(prefix)?;
+            let metas: Vec<_> = tokio::time::timeout(
+                PUT_TIMEOUT,
+                self.0.list(Some(&path)).try_collect::<Vec<_>>(),
+            )
+            .await
+            .map_err(|_| LogHavenError::Storage("listing the store timed out".into()))?
+            .map_err(|e| download_failed(&e))?;
+            Ok(metas.into_iter().map(|m| m.location.to_string()).collect())
+        })
+    }
+
+    fn get<'a>(&'a self, key: &'a str, max_bytes: u64) -> BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(async move {
+            use object_store::ObjectStoreExt;
+            let path = parse_key(key)?;
+            let result = self.0.get(&path).await.map_err(|e| download_failed(&e))?;
+            if result.meta.size > max_bytes {
+                return Err(LogHavenError::Storage(format!(
+                    "object is {} bytes, more than the {max_bytes} a chunk may have",
+                    result.meta.size
+                )));
+            }
+            let budget = upload_budget(result.meta.size);
+            let bytes = tokio::time::timeout(budget, result.bytes())
+                .await
+                .map_err(|_| LogHavenError::Storage("download from cloud timed out".into()))?
+                .map_err(|e| download_failed(&e))?;
+            Ok(bytes.to_vec())
+        })
+    }
+}
+
+fn download_failed(e: &dyn std::fmt::Display) -> LogHavenError {
+    LogHavenError::Storage(format!("download from cloud failed: {}", tidy(e)))
+}
+
+fn parse_key(key: &str) -> Result<object_store::path::Path> {
+    object_store::path::Path::parse(key)
+        .map_err(|e| LogHavenError::Storage(format!("bad object key: {}", tidy(&e))))
 }
 
 /// One upload destination.
@@ -118,6 +173,33 @@ impl Target {
 
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// Names, relative to the prefix, of the objects stored for one app.
+    pub async fn list_app(&self, app: &str) -> Result<Vec<String>> {
+        let under = self.under_prefix(app);
+        let keys = self.store.list(&under).await?;
+        let strip = if self.prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", self.prefix)
+        };
+        Ok(keys
+            .into_iter()
+            .filter_map(|k| k.strip_prefix(&strip).map(String::from))
+            .collect())
+    }
+
+    pub async fn get_named(&self, name: &str, max_bytes: u64) -> Result<Vec<u8>> {
+        self.store.get(&self.under_prefix(name), max_bytes).await
+    }
+
+    fn under_prefix(&self, rel: &str) -> String {
+        if self.prefix.is_empty() {
+            rel.to_string()
+        } else {
+            format!("{}/{}", self.prefix, rel)
+        }
     }
 
     fn key_for(&self, data_path: &Path, chunk_path: &Path) -> Result<String> {
