@@ -1,7 +1,5 @@
 use crate::error::{LogHavenError, Result};
-use aws_sdk_s3::Client;
-use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
-use aws_sdk_s3::primitives::ByteStream;
+use crate::storage::stores::tidy;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -9,59 +7,89 @@ use std::sync::Arc;
 
 const SYNCED_SUFFIX: &str = "synced";
 const PUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Where chunks are uploaded. Implemented for S3-compatible stores; tests use a mock.
+/// Where chunks are uploaded. The seam of the storage layer: the upload code only ever calls
+/// `put`, so the encryption, markers, retries and pruning work for every store. Implemented once
+/// over the `object_store` crate (S3 and compatible stores, Azure Blob Storage, Google Cloud
+/// Storage); tests use a mock. A store the crate does not cover (SFTP, WebDAV) is one more
+/// implementation of this trait plus a `TargetKind` variant.
 pub trait ObjectStore: Send + Sync {
     fn put<'a>(&'a self, key: &'a str, file: &'a Path) -> BoxFuture<'a, Result<()>>;
 }
 
-struct S3Store {
-    client: Client,
-    bucket: String,
+/// A chunk this big or smaller goes up in one request; a larger one in parts, read from the file
+/// as they are sent, so memory stays at a few parts however big the chunk is.
+const MULTIPART_THRESHOLD: u64 = 8 * 1024 * 1024;
+const PART_SIZE: usize = 8 * 1024 * 1024;
+/// The least a slow uplink is assumed to carry, which sets how long an upload may take.
+const MIN_BYTES_PER_SEC: u64 = 256 * 1024;
+
+/// An upload is given `PUT_TIMEOUT` plus the time its size needs at `MIN_BYTES_PER_SEC`.
+fn upload_budget(bytes: u64) -> std::time::Duration {
+    PUT_TIMEOUT + std::time::Duration::from_secs(bytes / MIN_BYTES_PER_SEC)
 }
 
-impl ObjectStore for S3Store {
+/// `ObjectStore` over the `object_store` crate.
+struct CrateStore(Arc<dyn object_store::ObjectStore>);
+
+impl CrateStore {
+    async fn send(&self, path: &object_store::path::Path, file: &Path, len: u64) -> Result<()> {
+        use object_store::ObjectStoreExt;
+        use tokio::io::AsyncReadExt;
+        let fail = |e: &dyn std::fmt::Display| {
+            LogHavenError::Storage(format!("upload to cloud failed: {}", tidy(e)))
+        };
+        if len <= MULTIPART_THRESHOLD {
+            let bytes = tokio::fs::read(file)
+                .await
+                .map_err(|e| LogHavenError::Storage(format!("read chunk for upload: {e}")))?;
+            self.0
+                .put(path, object_store::PutPayload::from(bytes))
+                .await
+                .map_err(|e| fail(&e))?;
+            return Ok(());
+        }
+        let mut input = tokio::fs::File::open(file)
+            .await
+            .map_err(|e| LogHavenError::Storage(format!("read chunk for upload: {e}")))?;
+        let upload = self.0.put_multipart(path).await.map_err(|e| fail(&e))?;
+        let mut upload = object_store::WriteMultipart::new_with_chunk_size(upload, PART_SIZE);
+        let mut buf = vec![0u8; PART_SIZE];
+        loop {
+            // at most a few parts are in flight, so a big chunk never sits in memory whole
+            upload.wait_for_capacity(2).await.map_err(|e| fail(&e))?;
+            let n = input
+                .read(&mut buf)
+                .await
+                .map_err(|e| LogHavenError::Storage(format!("read chunk for upload: {e}")))?;
+            if n == 0 {
+                break;
+            }
+            upload.write(&buf[..n]);
+        }
+        upload.finish().await.map_err(|e| fail(&e))?;
+        Ok(())
+    }
+}
+
+impl ObjectStore for CrateStore {
     fn put<'a>(&'a self, key: &'a str, file: &'a Path) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let body = ByteStream::from_path(file)
-                .await
-                .map_err(|e| LogHavenError::Storage(format!("read chunk for upload: {}", e)))?;
-            let send = self
-                .client
-                .put_object()
-                .bucket(&self.bucket)
-                .key(key)
-                .body(body)
-                .send();
-            // a hung PUT would hold the app's sync lock and stall all later uploads
-            tokio::time::timeout(PUT_TIMEOUT, send)
+            let path = object_store::path::Path::parse(key)
+                .map_err(|e| LogHavenError::Storage(format!("bad object key: {}", tidy(&e))))?;
+            let len = std::fs::metadata(file)
+                .map_err(|e| LogHavenError::Storage(format!("read chunk for upload: {e}")))?
+                .len();
+            // a hung upload would hold the app's sync lock and stall all later uploads
+            tokio::time::timeout(upload_budget(len), self.send(&path, file, len))
                 .await
                 .map_err(|_| LogHavenError::Storage("upload to cloud timed out".into()))?
-                .map_err(|e| LogHavenError::Storage(format!("upload to cloud failed: {}", e)))?;
-            Ok(())
         })
     }
 }
 
-/// Everything the S3 adapter needs to reach one store.
-pub struct S3Settings {
-    /// Names the store in partial-upload markers, so keep it stable.
-    pub label: String,
-    pub bucket: String,
-    pub region: String,
-    pub prefix: Option<String>,
-    /// `None` is AWS.
-    pub endpoint: Option<String>,
-    pub path_style: bool,
-    pub access_key: String,
-    pub secret_key: String,
-}
-
-/// One upload destination. `ObjectStore` is the seam for a store that does not speak the S3 API
-/// (Azure Blob Storage, Google Cloud Storage's native API, SFTP): implement it and add a
-/// constructor and a config section next to `s3_compatible`.
+/// One upload destination.
 pub struct Target {
     /// Names the target's partial marker while several targets are in use.
     label: String,
@@ -78,24 +106,14 @@ impl Target {
         }
     }
 
-    /// Any store that speaks the S3 API. AWS S3, Cloudflare R2 and MinIO are the same adapter
-    /// with different settings, as are Backblaze B2, Wasabi, DigitalOcean Spaces and Ceph.
-    pub fn s3_compatible(s: S3Settings) -> Self {
-        let client = build_client(
-            &s.access_key,
-            &s.secret_key,
-            s.region,
-            s.endpoint,
-            s.path_style,
-        );
-        Self::new(
-            &s.label,
-            Box::new(S3Store {
-                client,
-                bucket: s.bucket,
-            }),
-            s.prefix,
-        )
+    /// A store set up from one `[[storage.targets]]` entry.
+    pub fn from_config(t: &crate::config::StorageTarget) -> Result<Self> {
+        let store = crate::storage::stores::build(t)?;
+        Ok(Self::new(
+            &t.name,
+            Box::new(CrateStore(store)),
+            t.prefix.clone(),
+        ))
     }
 
     pub fn label(&self) -> &str {
@@ -302,30 +320,6 @@ fn unsynced_chunks(app_dir: &Path) -> Vec<PathBuf> {
     }
     out.sort();
     out
-}
-
-fn build_client(
-    access_key: &str,
-    secret_key: &str,
-    region: String,
-    endpoint_url: Option<String>,
-    force_path_style: bool,
-) -> Client {
-    let creds = Credentials::new(access_key, secret_key, None, None, "loghaven");
-    let mut builder = aws_sdk_s3::Config::builder()
-        .credentials_provider(creds)
-        .region(Region::new(region))
-        .behavior_version(BehaviorVersion::latest());
-
-    if let Some(url) = endpoint_url {
-        builder = builder.endpoint_url(url);
-    }
-
-    if force_path_style {
-        builder = builder.force_path_style(true);
-    }
-
-    Client::from_conf(builder.build())
 }
 
 #[cfg(test)]
@@ -757,5 +751,311 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_millis(200), s.upload_chunk(&a)).await;
         assert!(timed_out.is_err());
         assert!(!a.with_extension("parquet.enc.tmp").exists());
+    }
+
+    /// What a fake store server saw.
+    #[derive(Clone, Debug)]
+    struct Seen {
+        method: String,
+        path: String,
+        query: String,
+        host: String,
+        headers: Vec<(String, String)>,
+        body: usize,
+    }
+
+    async fn fake_store() -> (String, Arc<Mutex<Vec<Seen>>>) {
+        use axum::{Router, body::Bytes, extract::Request};
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let app = Router::new().fallback(move |req: Request| {
+            let log = log.clone();
+            async move {
+                let (parts, body) = req.into_parts();
+                let bytes: Bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+                log.lock().unwrap().push(Seen {
+                    method: parts.method.to_string(),
+                    path: parts.uri.path().to_string(),
+                    query: parts.uri.query().unwrap_or("").to_string(),
+                    host: parts
+                        .headers
+                        .get("host")
+                        .and_then(|h| h.to_str().ok())
+                        .unwrap_or("")
+                        .to_string(),
+                    headers: parts
+                        .headers
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                        .collect(),
+                    body: bytes.len(),
+                });
+                // the three answers an S3 multipart upload needs; anything else is a plain 200
+                let (method, query) = (parts.method.as_str(), parts.uri.query().unwrap_or(""));
+                let body = if method == "POST" && query.contains("uploads") {
+                    "<InitiateMultipartUploadResult><UploadId>u1</UploadId></InitiateMultipartUploadResult>"
+                } else if method == "POST" && query.contains("uploadId") {
+                    "<CompleteMultipartUploadResult><ETag>\"done\"</ETag></CompleteMultipartUploadResult>"
+                } else {
+                    ""
+                };
+                axum::http::Response::builder()
+                    .status(200)
+                    .header("etag", "\"abc\"")
+                    .body(axum::body::Body::from(body))
+                    .unwrap()
+            }
+        });
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        (addr, seen)
+    }
+
+    fn from_toml(toml: &str) -> crate::config::StorageTarget {
+        let cfg: crate::config::Config =
+            toml::from_str(&format!("[[storage.targets]]\n{toml}")).unwrap();
+        cfg.storage.targets.into_iter().next().unwrap()
+    }
+
+    async fn upload_one(t: &crate::config::StorageTarget, tmp: &Path) -> Result<()> {
+        // the client reads the environment when it is built, and only then
+        let target = {
+            let _g = crate::storage::env_guard();
+            Target::from_config(t).unwrap()
+        };
+        let file = tmp.join("web/2024-01-01/1-1.parquet");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, vec![7u8; 1234]).unwrap();
+        let key = target.key_for(tmp, &file).unwrap();
+        target.store.put(&key, &file).await
+    }
+
+    #[tokio::test]
+    async fn s3_path_style_puts_the_object_under_the_bucket_with_a_signed_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (addr, seen) = fake_store().await;
+        let t = from_toml(&format!(
+            "name = \"b2\"\ntype = \"s3\"\nbucket = \"logs\"\nprefix = \"p\"\nendpoint = \"http://{addr}\"\npath_style = true\naccess_key = \"k\"\nsecret_key = \"s\"\n"
+        ));
+        upload_one(&t, tmp.path()).await.unwrap();
+        let s = seen.lock().unwrap()[0].clone();
+        assert_eq!(
+            (s.method.as_str(), s.path.as_str()),
+            ("PUT", "/logs/p/web/2024-01-01/1-1.parquet")
+        );
+        assert_eq!(s.body, 1234);
+        assert!(
+            s.headers
+                .iter()
+                .any(|(k, v)| k == "authorization" && v.starts_with("AWS4-HMAC-SHA256"))
+        );
+    }
+
+    #[test]
+    fn s3_virtual_hosted_style_needs_a_host_name_and_path_style_is_the_way_for_an_address() {
+        let t = from_toml(
+            "name = \"w\"\ntype = \"s3\"\nbucket = \"logs\"\nendpoint = \"https://s3.example.com\"\naccess_key = \"k\"\nsecret_key = \"s\"\n",
+        );
+        let _g = crate::storage::env_guard();
+        assert!(Target::from_config(&t).is_ok());
+        let t = from_toml(
+            "name = \"w\"\ntype = \"s3\"\nbucket = \"logs\"\nendpoint = \"http://192.168.1.5:9000\"\naccess_key = \"k\"\nsecret_key = \"s\"\n",
+        );
+        let e = Target::from_config(&t).err().unwrap().to_string();
+        assert!(e.contains("path_style = true") && e.contains("'w'"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn azure_puts_a_block_blob_with_the_shared_key_or_the_sas_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (addr, seen) = fake_store().await;
+        let key = "c2VjcmV0LWtleS1mb3ItdGVzdHM=";
+        let t = from_toml(&format!(
+            "name = \"az\"\ntype = \"azure\"\naccount = \"acct\"\ncontainer = \"logs\"\nendpoint = \"http://{addr}\"\naccess_key = \"{key}\"\n"
+        ));
+        upload_one(&t, tmp.path()).await.unwrap();
+        let s = seen.lock().unwrap().last().unwrap().clone();
+        assert_eq!(s.method, "PUT");
+        assert!(
+            s.path.ends_with("/logs/web/2024-01-01/1-1.parquet"),
+            "{}",
+            s.path
+        );
+        assert!(
+            s.headers
+                .iter()
+                .any(|(k, v)| k == "x-ms-blob-type" && v == "BlockBlob")
+        );
+        assert!(
+            s.headers
+                .iter()
+                .any(|(k, v)| k == "authorization" && v.starts_with("SharedKey acct:"))
+        );
+
+        let t = from_toml(&format!(
+            "name = \"az2\"\ntype = \"azure\"\naccount = \"acct\"\ncontainer = \"logs\"\nendpoint = \"http://{addr}\"\nsas_token = \"?sv=2022&sig=abc\"\n"
+        ));
+        upload_one(&t, tmp.path()).await.unwrap();
+        let log = seen.lock().unwrap();
+        let s = log.last().unwrap();
+        assert!(
+            s.headers.iter().all(|(k, _)| k != "authorization"),
+            "a SAS token rides in the query"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_store_gives_an_error_without_the_query_string() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = from_toml(
+            "name = \"az\"\ntype = \"azure\"\naccount = \"acct\"\ncontainer = \"logs\"\nendpoint = \"http://127.0.0.1:1\"\nsas_token = \"sv=1&sig=TOPSECRETSIG\"\n",
+        );
+        let e = upload_one(&t, tmp.path()).await.unwrap_err().to_string();
+        assert!(
+            e.contains("upload to cloud failed") && !e.contains("TOPSECRETSIG"),
+            "{e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_portal_made_sas_token_keeps_its_percent_encoding_on_the_wire() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (addr, seen) = fake_store().await;
+        let t = from_toml(&format!(
+            "name = \"az\"\ntype = \"azure\"\naccount = \"acct\"\ncontainer = \"logs\"\nendpoint = \"http://{addr}\"\nsas_token = \"?sv=2022-11-02&se=2030-01-01T00%3A00%3A00Z&sig=abc%2Bdef%3D\"\n"
+        ));
+        upload_one(&t, tmp.path()).await.unwrap();
+        let q = seen.lock().unwrap().last().unwrap().query.clone();
+        assert!(q.contains("sig=abc%2Bdef%3D"), "{q}");
+        assert!(q.contains("se=2030-01-01T00%3A00%3A00Z"), "{q}");
+        assert!(!q.contains("%25"), "encoded twice: {q}");
+    }
+
+    #[tokio::test]
+    async fn explicit_settings_are_not_changed_by_stray_environment_variables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (addr, seen) = fake_store().await;
+        let t = from_toml(&format!(
+            "name = \"b2\"\ntype = \"s3\"\nbucket = \"logs\"\nendpoint = \"http://{addr}\"\npath_style = true\naccess_key = \"k\"\nsecret_key = \"s\"\n"
+        ));
+        let target = {
+            let _g = crate::storage::env_guard();
+            unsafe {
+                std::env::set_var("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:1");
+                std::env::set_var("AWS_ENDPOINT", "http://127.0.0.1:1");
+                std::env::set_var("AWS_SESSION_TOKEN", "stale-token");
+            }
+            let built = Target::from_config(&t).unwrap();
+            unsafe {
+                std::env::remove_var("AWS_ENDPOINT_URL_S3");
+                std::env::remove_var("AWS_ENDPOINT");
+                std::env::remove_var("AWS_SESSION_TOKEN");
+            }
+            built
+        };
+        let file = tmp.path().join("web/2024-01-01/1-1.parquet");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"rows").unwrap();
+        target.store.put("web/x.parquet", &file).await.unwrap();
+        let s = seen.lock().unwrap().last().unwrap().clone();
+        assert_eq!(s.path, "/logs/web/x.parquet");
+        assert!(
+            s.headers.iter().all(|(k, _)| k != "x-amz-security-token"),
+            "a stale session token was signed in"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chunk_above_the_threshold_goes_up_in_parts_and_arrives_whole() {
+        use object_store::ObjectStoreExt;
+        let mem = Arc::new(object_store::memory::InMemory::new());
+        let store = CrateStore(mem.clone());
+        let tmp = tempfile::tempdir().unwrap();
+        let big = tmp.path().join("big.parquet");
+        let len = MULTIPART_THRESHOLD as usize * 2 + 12_345;
+        let data: Vec<u8> = (0..len).map(|i| (i * 31 % 251) as u8).collect();
+        std::fs::write(&big, &data).unwrap();
+        store.put("p/big.parquet", &big).await.unwrap();
+        let got = mem
+            .get(&object_store::path::Path::from("p/big.parquet"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(got.len(), len);
+        assert!(got.as_ref() == data.as_slice(), "content differs");
+
+        let small = tmp.path().join("small.parquet");
+        std::fs::write(&small, b"tiny").unwrap();
+        store.put("p/small.parquet", &small).await.unwrap();
+        let got = mem
+            .get(&object_store::path::Path::from("p/small.parquet"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(got.as_ref(), b"tiny");
+    }
+
+    #[test]
+    fn a_big_upload_is_given_more_time_than_a_small_one() {
+        let small = upload_budget(1024);
+        let big = upload_budget(512 * 1024 * 1024);
+        assert_eq!(small, PUT_TIMEOUT);
+        assert!(
+            big >= PUT_TIMEOUT + std::time::Duration::from_secs(2000),
+            "{big:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_big_chunk_to_an_s3_store_is_sent_as_a_multipart_upload_and_a_small_one_as_one_put() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (addr, seen) = fake_store().await;
+        let t = from_toml(&format!(
+            "name = \"b2\"\ntype = \"s3\"\nbucket = \"logs\"\nendpoint = \"http://{addr}\"\npath_style = true\naccess_key = \"k\"\nsecret_key = \"s\"\n"
+        ));
+        let target = {
+            let _g = crate::storage::env_guard();
+            Target::from_config(&t).unwrap()
+        };
+        let small = tmp.path().join("small.parquet");
+        std::fs::write(&small, vec![1u8; 1000]).unwrap();
+        target.store.put("web/small.parquet", &small).await.unwrap();
+        {
+            let log = seen.lock().unwrap();
+            assert_eq!(log.len(), 1);
+            assert_eq!((log[0].method.as_str(), log[0].body), ("PUT", 1000));
+        }
+        seen.lock().unwrap().clear();
+
+        let big = tmp.path().join("big.parquet");
+        let len = MULTIPART_THRESHOLD as usize * 2 + 100;
+        std::fs::write(&big, vec![2u8; len]).unwrap();
+        target.store.put("web/big.parquet", &big).await.unwrap();
+        let log = seen.lock().unwrap();
+        let parts: Vec<_> = log
+            .iter()
+            .filter(|s| s.query.contains("partNumber"))
+            .collect();
+        assert_eq!(parts.len(), 3, "{log:#?}");
+        assert_eq!(parts.iter().map(|p| p.body).sum::<usize>(), len);
+        assert!(parts.iter().all(|p| p.body <= PART_SIZE));
+        assert!(
+            log.iter()
+                .any(|s| s.method == "POST" && s.query.contains("uploads"))
+        );
+        assert!(
+            log.iter()
+                .any(|s| s.method == "POST" && s.query.contains("uploadId"))
+        );
+        assert!(
+            log.iter()
+                .all(|s| !(s.method == "PUT" && !s.query.contains("partNumber"))),
+            "no single PUT of the whole chunk"
+        );
     }
 }

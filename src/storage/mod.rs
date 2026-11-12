@@ -8,6 +8,16 @@ pub mod query;
 pub mod record;
 #[cfg(test)]
 mod storage_tests;
+mod stores;
+pub(crate) use stores::host_takes_a_bucket_prefix;
+
+/// Tests that set environment variables, or build a store client (which reads them), hold this:
+/// the process environment is shared by every test thread.
+#[cfg(test)]
+pub(crate) fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ENV.lock().unwrap_or_else(|e| e.into_inner())
+}
 pub(crate) mod writer;
 
 pub use app_name::validate_app_name;
@@ -15,8 +25,9 @@ pub use local::LocalBackend;
 pub use record::LogRecord;
 
 use crate::config::Config;
+use crate::config::{StorageTarget, TargetKind};
 use crate::error::{LogHavenError, Result};
-use cloud::{CloudSyncer, S3Settings, Target};
+use cloud::{CloudSyncer, Target};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -92,12 +103,21 @@ impl StorageRouter {
     }
 }
 
-fn resolve_syncer(config: &Config) -> Result<Option<std::sync::Arc<CloudSyncer>>> {
+/// The upload targets: `[[storage.targets]]` as written, or the older `backend`, `secondary` and
+/// `[storage.s3|r2|minio]` settings expanded into the same list, named `s3`, `r2` and `minio`.
+pub fn resolve_targets(config: &Config) -> Result<Vec<StorageTarget>> {
+    if !config.storage.targets.is_empty() {
+        // `local` (also set with LOGHAVEN_STORAGE_BACKEND) means never upload, targets or not
+        if config.storage.backend == "local" {
+            return Ok(vec![]);
+        }
+        return Ok(config.storage.targets.clone());
+    }
     let backend = config.storage.backend.as_str();
     let mut targets = vec![];
     match backend {
         "local" => {}
-        "s3" | "r2" | "minio" => targets.push(required_target(config, backend)?),
+        "s3" | "r2" | "minio" => targets.push(legacy_target(config, backend)?),
         "auto" => targets.extend(auto_detect_target(config)),
         _ => {
             return Err(LogHavenError::Config(format!(
@@ -118,14 +138,21 @@ fn resolve_syncer(config: &Config) -> Result<Option<std::sync::Arc<CloudSyncer>>
                 "secondary needs a cloud backend: set backend to s3, r2, minio or auto".into(),
             ));
         };
-        if first.label() == second {
+        if first.name == second {
             return Err(LogHavenError::Config(format!(
                 "secondary is the same store as the backend ({second}); pick a different one"
             )));
         }
-        targets.push(required_target(config, second)?);
+        targets.push(legacy_target(config, second)?);
     }
+    Ok(targets)
+}
 
+fn resolve_syncer(config: &Config) -> Result<Option<std::sync::Arc<CloudSyncer>>> {
+    let targets = resolve_targets(config)?
+        .iter()
+        .map(Target::from_config)
+        .collect::<Result<Vec<_>>>()?;
     if targets.is_empty() {
         return Ok(None);
     }
@@ -142,47 +169,55 @@ fn resolve_syncer(config: &Config) -> Result<Option<std::sync::Arc<CloudSyncer>>
     Ok(Some(CloudSyncer::with_targets(targets, data_path, delete)))
 }
 
-/// The named store, which must be fully configured.
-fn required_target(config: &Config, kind: &str) -> Result<Target> {
-    Ok(Target::s3_compatible(s3_settings(config, kind)?))
-}
-
-/// `s3`, `r2` and `minio` are three ways to fill in the same adapter.
-fn s3_settings(config: &Config, kind: &str) -> Result<S3Settings> {
+/// One of the older fixed sections as a target. `s3`, `r2` and `minio` are the same S3-API store
+/// with different settings.
+fn legacy_target(config: &Config, kind: &str) -> Result<StorageTarget> {
     let missing = |section: &str| {
         LogHavenError::Config(format!(
             "{kind} is used but there is no [storage.{section}] config"
         ))
     };
-    match kind {
+    let (prefix, s3) = match kind {
         "s3" => {
             let s3 = config.storage.s3.as_ref().ok_or_else(|| missing("s3"))?;
-            Ok(S3Settings {
-                label: "s3".into(),
-                bucket: s3.bucket.clone(),
-                region: s3.region.clone(),
-                prefix: s3.prefix.clone(),
-                endpoint: s3.endpoint.clone(),
-                path_style: s3.path_style,
-                access_key: required_key(&s3.access_key, "s3.access_key")?,
-                secret_key: required_key(&s3.secret_key, "s3.secret_key")?,
-            })
+            (
+                s3.prefix.clone(),
+                TargetKind::S3 {
+                    bucket: s3.bucket.clone(),
+                    region: Some(s3.region.clone()),
+                    endpoint: s3.endpoint.clone(),
+                    // an address or bare host name cannot carry the bucket in the host; the
+                    // previous client addressed such a server by path on its own
+                    path_style: s3.path_style
+                        || s3
+                            .endpoint
+                            .as_deref()
+                            .is_some_and(|e| !host_takes_a_bucket_prefix(e)),
+                    access_key: Some(required_key(&s3.access_key, "s3.access_key")?),
+                    access_key_env: None,
+                    secret_key: Some(required_key(&s3.secret_key, "s3.secret_key")?),
+                    secret_key_env: None,
+                },
+            )
         }
         "r2" => {
             let r2 = config.storage.r2.as_ref().ok_or_else(|| missing("r2"))?;
-            Ok(S3Settings {
-                label: "r2".into(),
-                bucket: r2.bucket.clone(),
-                region: "auto".into(),
-                prefix: r2.prefix.clone(),
-                endpoint: Some(format!(
-                    "https://{}.r2.cloudflarestorage.com",
-                    r2.account_id
-                )),
-                path_style: false,
-                access_key: required_key(&r2.access_key, "r2.access_key")?,
-                secret_key: required_key(&r2.secret_key, "r2.secret_key")?,
-            })
+            (
+                r2.prefix.clone(),
+                TargetKind::S3 {
+                    bucket: r2.bucket.clone(),
+                    region: Some("auto".into()),
+                    endpoint: Some(format!(
+                        "https://{}.r2.cloudflarestorage.com",
+                        r2.account_id
+                    )),
+                    path_style: true,
+                    access_key: Some(required_key(&r2.access_key, "r2.access_key")?),
+                    access_key_env: None,
+                    secret_key: Some(required_key(&r2.secret_key, "r2.secret_key")?),
+                    secret_key_env: None,
+                },
+            )
         }
         "minio" => {
             let m = config
@@ -190,23 +225,33 @@ fn s3_settings(config: &Config, kind: &str) -> Result<S3Settings> {
                 .minio
                 .as_ref()
                 .ok_or_else(|| missing("minio"))?;
-            Ok(S3Settings {
-                label: "minio".into(),
-                bucket: m.bucket.clone(),
-                region: m.region.clone().unwrap_or_else(|| "us-east-1".into()),
-                prefix: m.prefix.clone(),
-                endpoint: Some(m.endpoint.clone()),
-                path_style: m.path_style.unwrap_or(true),
-                access_key: m.access_key.clone(),
-                secret_key: m.secret_key.clone(),
-            })
+            (
+                m.prefix.clone(),
+                TargetKind::S3 {
+                    bucket: m.bucket.clone(),
+                    region: Some(m.region.clone().unwrap_or_else(|| "us-east-1".into())),
+                    endpoint: Some(m.endpoint.clone()),
+                    path_style: m.path_style.unwrap_or(true),
+                    access_key: Some(m.access_key.clone()),
+                    access_key_env: None,
+                    secret_key: Some(m.secret_key.clone()),
+                    secret_key_env: None,
+                },
+            )
         }
-        other => Err(LogHavenError::Config(format!("unknown store: {other}"))),
-    }
+        other => {
+            return Err(LogHavenError::Config(format!("unknown store: {other}")));
+        }
+    };
+    Ok(StorageTarget {
+        name: kind.to_string(),
+        prefix,
+        kind: s3,
+    })
 }
 
 /// The first of S3, R2 and MinIO that has credentials.
-fn auto_detect_target(config: &Config) -> Option<Target> {
+fn auto_detect_target(config: &Config) -> Option<StorageTarget> {
     let has_keys = |a: &Option<String>, b: &Option<String>| a.is_some() && b.is_some();
     let kind = if config
         .storage
@@ -232,7 +277,7 @@ fn auto_detect_target(config: &Config) -> Option<Target> {
     } else {
         return None;
     };
-    required_target(config, kind).ok()
+    legacy_target(config, kind).ok()
 }
 
 fn required_key(val: &Option<String>, field: &str) -> Result<String> {
@@ -400,9 +445,29 @@ mod tests {
         );
     }
 
+    /// The S3 settings of the target `name` after the older settings were expanded.
+    fn s3_of(cfg: &Config, name: &str) -> (StorageTarget, String, Option<String>, bool, String) {
+        let t = resolve_targets(cfg)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name == name)
+            .unwrap();
+        let TargetKind::S3 {
+            region,
+            endpoint,
+            path_style,
+            bucket,
+            ..
+        } = t.kind.clone()
+        else {
+            panic!("not s3");
+        };
+        (t, region.unwrap(), endpoint, path_style, bucket)
+    }
+
     #[test]
-    fn the_three_store_kinds_are_the_same_adapter_with_different_settings() {
-        let mut cfg = two_stores("s3", None);
+    fn the_older_settings_expand_into_the_same_target_list() {
+        let mut cfg = two_stores("auto", None);
         cfg.storage.r2 = Some(crate::config::R2StorageConfig {
             account_id: "acct".into(),
             bucket: "rb".into(),
@@ -411,31 +476,43 @@ mod tests {
             secret_key: Some("s".into()),
         });
 
-        let aws = s3_settings(&cfg, "s3").unwrap();
+        let (t, region, endpoint, path_style, _) = s3_of(&cfg, "s3");
+        assert_eq!(t.name, "s3");
         assert_eq!(
-            (aws.label.as_str(), aws.endpoint.as_deref(), aws.path_style),
-            ("s3", None, false)
+            (endpoint, path_style, region.as_str()),
+            (None, false, "us-east-1")
         );
 
-        let r2 = s3_settings(&cfg, "r2").unwrap();
-        assert_eq!(r2.label, "r2");
+        let (t, region, endpoint, path_style, bucket) = s3_of(
+            &{
+                let mut c = cfg.clone();
+                c.storage.s3 = None;
+                c
+            },
+            "r2",
+        );
         assert_eq!(
-            r2.endpoint.as_deref(),
+            endpoint.as_deref(),
             Some("https://acct.r2.cloudflarestorage.com")
         );
         assert_eq!(
-            (r2.region.as_str(), r2.path_style, r2.prefix.as_deref()),
-            ("auto", false, Some("p"))
+            (region.as_str(), path_style, bucket.as_str()),
+            ("auto", true, "rb")
         );
+        assert_eq!(t.prefix.as_deref(), Some("p"));
 
-        let minio = s3_settings(&cfg, "minio").unwrap();
-        assert_eq!(minio.label, "minio");
-        assert_eq!(minio.endpoint.as_deref(), Some("http://localhost:9000"));
-        assert_eq!(
-            (minio.region.as_str(), minio.path_style),
-            ("us-east-1", true)
+        let (_, region, endpoint, path_style, _) = s3_of(
+            &{
+                let mut c = cfg.clone();
+                c.storage.s3 = None;
+                c.storage.r2 = None;
+                c
+            },
+            "minio",
         );
-        assert!(s3_settings(&cfg, "gcs").is_err());
+        assert_eq!(endpoint.as_deref(), Some("http://localhost:9000"));
+        assert_eq!((region.as_str(), path_style), ("us-east-1", true));
+        assert!(legacy_target(&cfg, "gcs").is_err());
     }
 
     #[test]
@@ -445,12 +522,12 @@ mod tests {
         s3.endpoint = Some("https://s3.us-west-004.backblazeb2.com".into());
         s3.region = "us-west-004".into();
         s3.path_style = true;
-        let got = s3_settings(&cfg, "s3").unwrap();
+        let (_, region, endpoint, path_style, _) = s3_of(&cfg, "s3");
         assert_eq!(
-            got.endpoint.as_deref(),
+            endpoint.as_deref(),
             Some("https://s3.us-west-004.backblazeb2.com")
         );
-        assert_eq!((got.region.as_str(), got.path_style), ("us-west-004", true));
+        assert_eq!((region.as_str(), path_style), ("us-west-004", true));
         assert_eq!(labels(&cfg).unwrap(), ["s3"]);
     }
 
@@ -461,9 +538,9 @@ mod tests {
         m.region = Some("eu-west-1".into());
         m.path_style = Some(false);
         m.prefix = Some("logs".into());
-        let got = s3_settings(&cfg, "minio").unwrap();
+        let (t, region, _, path_style, _) = s3_of(&cfg, "minio");
         assert_eq!(
-            (got.region.as_str(), got.path_style, got.prefix.as_deref()),
+            (region.as_str(), path_style, t.prefix.as_deref()),
             ("eu-west-1", false, Some("logs"))
         );
     }
@@ -506,5 +583,329 @@ mod tests {
         let mut cfg = two_stores("s3", None);
         cfg.storage.s3.as_mut().unwrap().endpoint = Some("https://s3.example.com".into());
         cfg.validate().unwrap();
+    }
+
+    fn with_targets(toml: &str) -> Result<Config> {
+        let cfg: Config = toml::from_str(toml).map_err(|e| LogHavenError::Config(e.to_string()))?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    const THREE: &str = r#"
+[[storage.targets]]
+name = "archive"
+type = "s3"
+bucket = "b"
+region = "eu-west-1"
+access_key_env = "LH_T_AK"
+secret_key_env = "LH_T_SK"
+
+[[storage.targets]]
+name = "backup"
+type = "azure"
+account = "acct"
+container = "logs"
+prefix = "loghaven"
+sas_token_env = "LH_T_SAS"
+
+[[storage.targets]]
+name = "gcs-eu"
+type = "gcs"
+bucket = "g"
+credentials_file = "/nonexistent/sa.json"
+"#;
+
+    /// A service-account file with a real private key, which is what the store client checks for.
+    fn service_account(dir: &std::path::Path) -> String {
+        let (private, public) = (dir.join("private.pem"), dir.join("public.pem"));
+        crate::auth::generate_keypair(&private, &public).unwrap();
+        let pem = std::fs::read_to_string(&private).unwrap();
+        let path = dir.join("sa.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "type": "service_account",
+                "project_id": "p",
+                "private_key_id": "k1",
+                "private_key": pem,
+                "client_email": "sa@p.iam.gserviceaccount.com",
+                "token_uri": "http://127.0.0.1:1/token"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn a_target_list_of_mixed_kinds_parses_and_keeps_its_names_and_order() {
+        let cfg = with_targets(THREE).unwrap();
+        let t = resolve_targets(&cfg).unwrap();
+        let names: Vec<_> = t.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["archive", "backup", "gcs-eu"]);
+        let kinds: Vec<_> = t.iter().map(|t| t.kind.type_name()).collect();
+        assert_eq!(kinds, ["s3", "azure", "gcs"]);
+        assert_eq!(t[1].prefix.as_deref(), Some("loghaven"));
+        assert!(
+            matches!(&t[0].kind, TargetKind::S3 { region: Some(r), path_style: false, .. } if r == "eu-west-1")
+        );
+    }
+
+    #[test]
+    fn target_lists_that_cannot_work_are_config_errors() {
+        let err = |extra: &str| {
+            with_targets(extra)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+        };
+        let one = |body: &str| format!("[[storage.targets]]\n{body}\n");
+        assert!(
+            err(&one("name = \"Bad Name\"\ntype = \"gcs\"\nbucket = \"b\""))
+                .contains("name must be")
+        );
+        assert!(err(&one("name = \"\"\ntype = \"gcs\"\nbucket = \"b\"")).contains("name must be"));
+        assert!(
+            err(&one(&format!(
+                "name = \"{}\"\ntype = \"gcs\"\nbucket = \"b\"",
+                "a".repeat(33)
+            )))
+            .contains("name must be")
+        );
+        let dup = format!(
+            "{0}{0}",
+            one("name = \"x\"\ntype = \"gcs\"\nbucket = \"b\"")
+        );
+        assert!(err(&dup).contains("used twice"));
+        assert!(
+            err(&one("name = \"x\"\ntype = \"s3\"\nbucket = \"\"")).contains("bucket is required")
+        );
+        assert!(
+            err(&one(
+                "name = \"x\"\ntype = \"s3\"\nbucket = \"b\"\nendpoint = \"ftp://h\""
+            ))
+            .contains("endpoint")
+        );
+        assert!(err(&one("name = \"x\"\ntype = \"s3\"\nbucket = \"b\"\naccess_key = \"a\"\naccess_key_env = \"A\"\nsecret_key = \"s\"")).contains("not both"));
+        assert!(
+            err(&one(
+                "name = \"x\"\ntype = \"s3\"\nbucket = \"b\"\naccess_key = \"a\""
+            ))
+            .contains("together")
+        );
+        assert!(err(&one("name = \"x\"\ntype = \"azure\"\naccount = \"a\"\ncontainer = \"c\"\naccess_key = \"k\"\nsas_token = \"s\"")).contains("not both"));
+        assert!(
+            err(&one(
+                "name = \"x\"\ntype = \"gcs\"\nbucket = \"b\"\nprefix = \"../up\""
+            ))
+            .contains("prefix")
+        );
+        assert!(
+            err(&one("name = \"x\"\ntype = \"nope\"")).contains("nope")
+                || !err(&one("name = \"x\"\ntype = \"nope\"")).is_empty()
+        );
+    }
+
+    #[test]
+    fn the_list_and_the_older_settings_cannot_be_mixed() {
+        let target = "[[storage.targets]]\nname = \"x\"\ntype = \"gcs\"\nbucket = \"b\"\n";
+        for older in [
+            "[storage]\nbackend = \"s3\"\n",
+            "[storage]\nsecondary = \"minio\"\n",
+        ] {
+            // the list has to come after a [storage] header that holds the older keys
+            let text = format!("{older}{target}");
+            let e = with_targets(&text)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(e.contains("cannot be combined"), "{older:?}: {e}");
+        }
+        let with_section = format!("{target}[storage.s3]\nbucket = \"b\"\nregion = \"r\"\n");
+        assert!(
+            with_targets(&with_section)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("cannot be combined")
+        );
+        assert!(with_targets(target).is_ok());
+        assert!(with_targets("[storage]\nbackend = \"local\"\n").is_ok());
+    }
+
+    #[test]
+    fn every_kind_builds_and_a_missing_secret_variable_is_named() {
+        let _g = env_guard();
+        unsafe {
+            std::env::set_var("LH_T_AK", "ak");
+            std::env::set_var("LH_T_SK", "sk");
+            std::env::set_var("LH_T_SAS", "sv=1&sig=x");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let sa = service_account(dir.path());
+        let cfg = with_targets(&THREE.replace("/nonexistent/sa.json", &sa)).unwrap();
+        let built: Vec<_> = resolve_targets(&cfg)
+            .unwrap()
+            .iter()
+            .map(|t| Target::from_config(t).map(|t| t.label().to_string()))
+            .collect();
+        assert_eq!(built[0].as_ref().unwrap(), "archive");
+        assert_eq!(built[1].as_ref().unwrap(), "backup");
+        assert_eq!(built[2].as_ref().unwrap(), "gcs-eu");
+        let missing = with_targets(THREE).unwrap();
+        let e = resolve_syncer(&missing).err().unwrap().to_string();
+        assert!(
+            e.contains("'gcs-eu'") && e.contains("sa.json"),
+            "a missing service-account file is a startup error: {e}"
+        );
+        unsafe { std::env::remove_var("LH_T_SK") };
+        let e = resolve_syncer(&cfg).err().unwrap().to_string();
+        assert!(
+            e.contains("LH_T_SK") && e.contains("'archive'") && !e.contains("ak"),
+            "{e}"
+        );
+        unsafe {
+            std::env::remove_var("LH_T_AK");
+            std::env::remove_var("LH_T_SAS");
+        }
+    }
+
+    #[test]
+    fn several_targets_make_one_syncer_with_a_marker_name_each() {
+        let _g = env_guard();
+        unsafe {
+            std::env::set_var("LH_T2_AK", "ak");
+            std::env::set_var("LH_T2_SK", "sk");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let sa = service_account(dir.path());
+        let cfg = with_targets(
+            &THREE
+                .replace("/nonexistent/sa.json", &sa)
+                .replace("LH_T_AK", "LH_T2_AK")
+                .replace("LH_T_SK", "LH_T2_SK")
+                .replace("sas_token_env = \"LH_T_SAS\"", "sas_token = \"sv=1&sig=x\""),
+        )
+        .unwrap();
+        assert_eq!(labels(&cfg).unwrap(), ["archive", "backup", "gcs-eu"]);
+    }
+
+    #[test]
+    fn a_default_config_file_can_be_extended_with_a_targets_list() {
+        let written = toml::to_string(&crate::config::default_config()).unwrap();
+        assert!(!written.contains("targets"), "{written}");
+        let extended = format!(
+            "{written}\n[[storage.targets]]\nname = \"x\"\ntype = \"gcs\"\nbucket = \"b\"\n"
+        );
+        let cfg: Config = toml::from_str(&extended).unwrap();
+        assert_eq!(cfg.storage.targets.len(), 1);
+        // and a config that has targets writes them back
+        let again: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(again.storage.targets[0].name, "x");
+    }
+
+    #[test]
+    fn a_misspelt_or_misplaced_key_in_a_target_is_an_error_naming_the_target() {
+        let err = |body: &str| {
+            with_targets(&format!("[[storage.targets]]\n{body}\n"))
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+        };
+        let s3 = "name = \"b2\"\ntype = \"s3\"\nbucket = \"b\"\n";
+        for (extra, field) in [
+            ("path-style = true", "path-style"),
+            ("rgion = \"x\"", "rgion"),
+            ("acess_key_env = \"A\"", "acess_key_env"),
+            ("sas_token = \"s\"", "sas_token"),
+        ] {
+            let e = err(&format!("{s3}{extra}"));
+            assert!(e.contains("'b2'") && e.contains(field), "{extra}: {e}");
+        }
+        let e = err("name = \"g\"\ntype = \"gcs\"\nbucket = \"b\"\naccess_key = \"zz\"");
+        assert!(e.contains("'g'") && e.contains("access_key"), "{e}");
+        assert!(err("type = \"gcs\"\nbucket = \"b\"").contains("name is required"));
+        assert!(err("name = 5\ntype = \"gcs\"\nbucket = \"b\"").contains("name must be a string"));
+        assert!(with_targets(&format!("[[storage.targets]]\n{s3}")).is_ok());
+    }
+
+    #[test]
+    fn a_prefix_must_be_plain_segments_for_targets_and_for_the_older_sections() {
+        let target = |prefix: &str| {
+            with_targets(&format!(
+                "[[storage.targets]]\nname = \"x\"\ntype = \"gcs\"\nbucket = \"b\"\nprefix = {prefix:?}\n"
+            ))
+        };
+        for bad in ["a//b", "./x", "x/./y", "../up", "a/../b", "a\\b", "a\u{1}b"] {
+            assert!(target(bad).is_err(), "{bad:?}");
+        }
+        for ok in ["loghaven", "a/b", "/a/b/", "v1..2", ""] {
+            assert!(target(ok).is_ok(), "{ok:?}");
+        }
+        let legacy = |section: &str| {
+            with_targets(&format!(
+                "[storage]\nbackend = \"s3\"\n[storage.s3]\nbucket = \"b\"\nregion = \"r\"\naccess_key = \"k\"\nsecret_key = \"s\"\nprefix = {section:?}\n"
+            ))
+        };
+        assert!(legacy("a//b").is_err());
+        assert!(legacy("logs/x").is_ok());
+    }
+
+    #[test]
+    fn backend_local_means_never_upload_even_with_targets() {
+        let _g = env_guard();
+        let target = "[[storage.targets]]\nname = \"x\"\ntype = \"gcs\"\nbucket = \"b\"\n";
+        let mut cfg = with_targets(target).unwrap();
+        assert_eq!(resolve_targets(&cfg).unwrap().len(), 1);
+        cfg.storage.backend = "local".into();
+        cfg.validate().unwrap();
+        assert!(resolve_targets(&cfg).unwrap().is_empty());
+        assert!(resolve_syncer(&cfg).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_older_s3_section_with_an_address_endpoint_still_works_by_path() {
+        let _g = env_guard();
+        for endpoint in [
+            "http://192.168.1.5:9000",
+            "http://minio:9000",
+            "http://localhost:9000",
+        ] {
+            let mut cfg = two_stores("s3", None);
+            cfg.storage.s3.as_mut().unwrap().endpoint = Some(endpoint.into());
+            cfg.validate().unwrap();
+            let (_, _, _, path_style, _) = s3_of(&cfg, "s3");
+            assert!(path_style, "{endpoint}");
+            assert!(resolve_syncer(&cfg).is_ok(), "{endpoint}");
+        }
+        let mut cfg = two_stores("s3", None);
+        cfg.storage.s3.as_mut().unwrap().endpoint = Some("https://s3.example.com".into());
+        assert!(!s3_of(&cfg, "s3").3);
+    }
+
+    #[test]
+    fn a_target_with_an_address_endpoint_and_no_path_style_fails_validation_not_only_startup() {
+        let e = with_targets(
+            "[[storage.targets]]\nname = \"x\"\ntype = \"s3\"\nbucket = \"b\"\nendpoint = \"http://10.0.0.5:9000\"\n",
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(e.contains("path_style = true"), "{e}");
+    }
+
+    #[test]
+    fn empty_secrets_in_a_target_are_rejected_by_validation() {
+        for body in [
+            "type = \"s3\"\nbucket = \"b\"\naccess_key = \"\"\nsecret_key = \"s\"",
+            "type = \"s3\"\nbucket = \"b\"\naccess_key = \"a\"\nsecret_key = \"  \"",
+            "type = \"azure\"\naccount = \"a\"\ncontainer = \"c\"\nsas_token = \"\"",
+        ] {
+            let e = with_targets(&format!("[[storage.targets]]\nname = \"x\"\n{body}\n"))
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(e.contains("is empty"), "{body}: {e}");
+        }
     }
 }
