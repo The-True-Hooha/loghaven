@@ -281,8 +281,7 @@ pub(crate) fn write_new_private(path: &Path, bytes: &[u8]) -> Result<()> {
 /// hold this; it also clears the variable.
 #[cfg(test)]
 pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let g = crate::storage::env_guard();
     unsafe { std::env::remove_var(KEY_ENV) };
     g
 }

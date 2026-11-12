@@ -311,7 +311,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 ### Phase 4 - Production hardening
 
 - Done: client-side encryption of cloud uploads (`encrypt_uploads`, AES-256-GCM, bound to the chunk's name, key id and `rotate-key`). Local chunks and the UDP wire format are not encrypted.
-- Done: multiple simultaneous storage backends (`secondary` store, uploaded alongside the main one)
+- Done: multiple simultaneous storage targets (`[[storage.targets]]`: S3 and compatible stores, Azure Blob Storage, Google Cloud Storage; `secondary` still works for the older settings)
 - Done: persistent sessions across restarts
 - Column projection in queries, dedicated writer threads
 - Choose and publish a license

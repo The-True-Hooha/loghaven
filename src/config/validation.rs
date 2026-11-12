@@ -5,6 +5,34 @@ use crate::error::{LogHavenError, Result};
 const MAX_BACKFILL: u64 = 100;
 
 pub fn validate(config: &Config) -> Result<()> {
+    if !config.storage.targets.is_empty() {
+        validate_targets(config)?;
+    } else {
+        validate_legacy_backend(config)?;
+    }
+    validate_rest(config)
+}
+
+fn validate_legacy_backend(config: &Config) -> Result<()> {
+    let st = &config.storage;
+    for (section, prefix) in [
+        (
+            "storage.s3",
+            st.s3.as_ref().and_then(|c| c.prefix.as_deref()),
+        ),
+        (
+            "storage.r2",
+            st.r2.as_ref().and_then(|c| c.prefix.as_deref()),
+        ),
+        (
+            "storage.minio",
+            st.minio.as_ref().and_then(|c| c.prefix.as_deref()),
+        ),
+    ] {
+        if let Some(p) = prefix {
+            check_prefix(section, p)?;
+        }
+    }
     match config.storage.backend.as_str() {
         "auto" => {}
         "local" => validate_local_storage(config)?,
@@ -19,6 +47,10 @@ pub fn validate(config: &Config) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_rest(config: &Config) -> Result<()> {
     match config.agent.log_level.as_str() {
         "trace" | "debug" | "info" | "warn" | "error" => {}
         level => {
@@ -85,6 +117,139 @@ fn check_endpoint(what: &str, url: &str) -> Result<()> {
             "{what} must be an http:// or https:// URL"
         )))
     }
+}
+
+const MAX_NAME: usize = 32;
+
+/// A prefix is a path of plain segments: nothing empty, `.` or `..` and no control characters,
+/// or every upload would fail the object-key check.
+pub fn check_prefix(at: &str, prefix: &str) -> Result<()> {
+    let ok = prefix
+        .trim_matches('/')
+        .split('/')
+        .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+        && !prefix.contains('\\')
+        && !prefix.chars().any(char::is_control);
+    if prefix.trim_matches('/').is_empty() || ok {
+        Ok(())
+    } else {
+        Err(LogHavenError::Config(format!(
+            "{at}: prefix must be plain path segments, with no empty, '.' or '..' segment, backslash or control character"
+        )))
+    }
+}
+
+fn validate_targets(config: &Config) -> Result<()> {
+    let bad = |m: String| Err(LogHavenError::Config(m));
+    let st = &config.storage;
+    if st.secondary.is_some()
+        || st.s3.is_some()
+        || st.r2.is_some()
+        || st.minio.is_some()
+        || !matches!(st.backend.as_str(), "auto" | "local")
+    {
+        return bad("[[storage.targets]] cannot be combined with backend, secondary or the [storage.s3|r2|minio] sections; move them into the list".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (i, t) in st.targets.iter().enumerate() {
+        let at = format!("storage.targets[{i}]");
+        if t.name.is_empty()
+            || t.name.len() > MAX_NAME
+            || !t
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+        {
+            return bad(format!(
+                "{at}: name must be 1 to {MAX_NAME} characters of a-z, 0-9, '-' and '_'"
+            ));
+        }
+        if !seen.insert(t.name.as_str()) {
+            return bad(format!("{at}: name '{}' is used twice", t.name));
+        }
+        if let Some(p) = &t.prefix {
+            check_prefix(&at, p)?;
+        }
+        match &t.kind {
+            super::TargetKind::S3 {
+                bucket,
+                endpoint,
+                path_style,
+                access_key,
+                access_key_env,
+                secret_key,
+                secret_key_env,
+                ..
+            } => {
+                if bucket.is_empty() {
+                    return bad(format!("{at}: bucket is required"));
+                }
+                if let Some(e) = endpoint {
+                    check_endpoint(&format!("{at}.endpoint"), e)?;
+                    if !*path_style && !crate::storage::host_takes_a_bucket_prefix(e) {
+                        return bad(format!(
+                            "{at}: this endpoint is an IP address or a bare host name, which cannot carry the bucket in the host: set path_style = true"
+                        ));
+                    }
+                }
+                one_source(&at, "access_key", access_key, access_key_env)?;
+                one_source(&at, "secret_key", secret_key, secret_key_env)?;
+                if access_key.is_some() != secret_key.is_some()
+                    || access_key_env.is_some() != secret_key_env.is_some()
+                    || (access_key.is_some() && access_key_env.is_some())
+                {
+                    return bad(format!(
+                        "{at}: give access_key and secret_key together, both plain or both as _env"
+                    ));
+                }
+            }
+            super::TargetKind::Azure {
+                account,
+                container,
+                endpoint,
+                access_key,
+                access_key_env,
+                sas_token,
+                sas_token_env,
+            } => {
+                if account.is_empty() || container.is_empty() {
+                    return bad(format!("{at}: account and container are required"));
+                }
+                if let Some(e) = endpoint {
+                    check_endpoint(&format!("{at}.endpoint"), e)?;
+                }
+                one_source(&at, "access_key", access_key, access_key_env)?;
+                one_source(&at, "sas_token", sas_token, sas_token_env)?;
+                if (access_key.is_some() || access_key_env.is_some())
+                    && (sas_token.is_some() || sas_token_env.is_some())
+                {
+                    return bad(format!("{at}: use an access key or a SAS token, not both"));
+                }
+            }
+            super::TargetKind::Gcs { bucket, .. } => {
+                if bucket.is_empty() {
+                    return bad(format!("{at}: bucket is required"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A secret is given in the config or as the name of an environment variable, not both.
+fn one_source(at: &str, what: &str, plain: &Option<String>, env: &Option<String>) -> Result<()> {
+    if plain.is_some() && env.is_some() {
+        return Err(LogHavenError::Config(format!(
+            "{at}: give {what} or {what}_env, not both"
+        )));
+    }
+    if env.as_deref().is_some_and(|e| e.trim().is_empty()) {
+        return Err(LogHavenError::Config(format!("{at}: {what}_env is empty")));
+    }
+    if plain.as_deref().is_some_and(|p| p.trim().is_empty()) {
+        return Err(LogHavenError::Config(format!("{at}: {what} is empty")));
+    }
+    Ok(())
 }
 
 fn validate_s3_storage(config: &Config) -> Result<()> {
