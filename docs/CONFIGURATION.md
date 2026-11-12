@@ -453,4 +453,21 @@ When a target gives its own credentials, nothing in the environment can change i
 
 **Tested with:** requests to local fake servers, which check the URL, headers and body each store type sends and that a big chunk goes up in parts (these run with the tests); by hand, S3-style uploads, including a 20 MiB chunk in parts, to a local S3 server (moto) and Azure Blob Storage, including a 20 MiB chunk in parts, to the Azurite emulator, with credentials from environment variables, with encryption, and with one store down and back. Google Cloud Storage was only checked against the local fake server (the PUT it sends to the `gcs_base_url` of a service-account file) and a locally run `fake-gcs-server`, which accepts the connection but not the XML-API upload the crate uses, so a real upload to Google Cloud Storage is untested. Real AWS, Azure and GCS accounts were not used.
 
-**Not covered:** stores with neither the S3 API nor Azure or Google's, such as SFTP or WebDAV. The upload code calls a single small `put` function, so one is an extra implementation of it and an extra `type`; ask if you need one. Uploads are write-only: nothing is read back, so with `delete_after_upload` the uploaded data is no longer searchable. 
+**Not covered:** stores with neither the S3 API nor Azure or Google's, such as SFTP or WebDAV. The upload code calls a single small `put` function, so one is an extra implementation of it and an extra `type`; ask if you need one. Queries only ever read the local data directory, so with `delete_after_upload` uploaded data is not searchable until it is restored (below).
+
+### Restoring chunks
+
+```
+loghaven storage restore web                       # every chunk of app "web"
+loghaven storage restore web --from 2024-05-01 --to 2024-05-07
+loghaven storage restore web --target s3           # needed when several targets are configured
+```
+
+Copies an app's chunks from one target back into the data directory as plain chunks, so queries, `logs`, the TUI and the dashboard see them again. It can run while the daemon runs. Chunks that were uploaded encrypted are decrypted with the keys in `keys_dir` and `LOGHAVEN_STORAGE_KEY` (each object records which key made it); without the right key those chunks are reported and the others are still restored. `--from` and `--to` are inclusive `YYYY-MM-DD` days.
+
+- **Checks:** an object is restored only if it is named `<app>/<date>/<chunk>.parquet` and, once decrypted, begins and ends with the Parquet magic number. Anything else is counted as skipped or reported as failed; nothing is left behind. When a chunk is in the store both encrypted and plain, the plain object is skipped. A chunk bigger than 1 GiB is refused.
+- **Local files:** the chunk is marked synced before it appears, so the uploader never sees it unmarked, and it is put in place only if nothing is there, so an existing chunk is never replaced. A day or app directory that is a symbolic link is refused. The command exits with an error when any chunk failed or when the store holds nothing for the app.
+- **Memory:** a chunk is downloaded into memory whole and held about two to three times over while it is decrypted, so the largest chunk (`rotate_size_mb`, 128 by default) costs a few hundred MB at most.
+- **Pruning:** the pruner treats restored chunks like any other, so with `retention_days` or `max_size_gb` set it can remove them again at its next pass; raise those first if the restored days are old.
+
+Only the S3-style, Azure and Google stores can be read; a store added later must implement `list` and `get` for this to work with it.
