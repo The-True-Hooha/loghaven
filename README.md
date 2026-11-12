@@ -276,7 +276,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 | 1 - Usable end to end | Token CLI, client SDK, `send`, `logs --follow`, wire spec | **Done** (v0.2, see [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md)) |
 | 2 - Chain awareness | tx-hash correlation (`trace`), Ethereum, Solana and Stellar adapters | **Done** (v0.3): `trace` and the Ethereum adapter shipped in v0.2; the Solana and Stellar adapters and Ethereum WebSocket block notifications in v0.3. Run against public networks since v0.4 |
 | 3 - Interfaces | TUI, web dashboard | **Done** (v0.4): `loghaven tui` and `loghaven dashboard` |
-| 4 - Production hardening | Client-side encryption of uploads, multi-backend, persistent sessions, license | **Mostly done**: only the license is left |
+| 4 - Production hardening | Client-side encryption of uploads, multi-backend, persistent sessions, license | **Done** |
 
 ### Phase 0 - Foundation (done)
 
@@ -314,7 +314,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 - Done: multiple simultaneous storage backends (`secondary` store, uploaded alongside the main one)
 - Done: persistent sessions across restarts
 - Column projection in queries, dedicated writer threads
-- Choose and publish a license
+- Done: dual MIT OR Apache-2.0 license
 
 Details of the completed hardening work are in [docs/HARDENING_PLAN.md](docs/HARDENING_PLAN.md).
 
@@ -384,7 +384,14 @@ LogHaven is in active development. Issues and pull requests are welcome. Please 
 
 ## License
 
-Not chosen yet (planned for Phase 4).
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in LogHaven by you, as defined in the Apache-2.0 license, is dual licensed as above, without any additional terms or conditions.
 
 ## Links
 
