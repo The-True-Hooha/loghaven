@@ -23,7 +23,8 @@ pub trait ObjectStore: Send + Sync {
         Box::pin(async { Err(LogHavenError::Storage("this store cannot be listed".into())) })
     }
 
-    fn get<'a>(&'a self, _key: &'a str) -> BoxFuture<'a, Result<Vec<u8>>> {
+    /// The object's bytes; an object larger than `max_bytes` is refused before it is read.
+    fn get<'a>(&'a self, _key: &'a str, _max_bytes: u64) -> BoxFuture<'a, Result<Vec<u8>>> {
         Box::pin(async { Err(LogHavenError::Storage("this store cannot be read".into())) })
     }
 }
@@ -113,11 +114,17 @@ impl ObjectStore for CrateStore {
         })
     }
 
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Vec<u8>>> {
+    fn get<'a>(&'a self, key: &'a str, max_bytes: u64) -> BoxFuture<'a, Result<Vec<u8>>> {
         Box::pin(async move {
             use object_store::ObjectStoreExt;
             let path = parse_key(key)?;
             let result = self.0.get(&path).await.map_err(|e| download_failed(&e))?;
+            if result.meta.size > max_bytes {
+                return Err(LogHavenError::Storage(format!(
+                    "object is {} bytes, more than the {max_bytes} a chunk may have",
+                    result.meta.size
+                )));
+            }
             let budget = upload_budget(result.meta.size);
             let bytes = tokio::time::timeout(budget, result.bytes())
                 .await
@@ -183,8 +190,8 @@ impl Target {
             .collect())
     }
 
-    pub async fn get_named(&self, name: &str) -> Result<Vec<u8>> {
-        self.store.get(&self.under_prefix(name)).await
+    pub async fn get_named(&self, name: &str, max_bytes: u64) -> Result<Vec<u8>> {
+        self.store.get(&self.under_prefix(name), max_bytes).await
     }
 
     fn under_prefix(&self, rel: &str) -> String {

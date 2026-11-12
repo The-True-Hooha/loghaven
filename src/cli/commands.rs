@@ -852,10 +852,11 @@ pub fn storage_restore(
     })?;
 
     let store = crate::storage::cloud::Target::from_config(chosen)?;
-    let keys = crate::storage::crypt::Encryptor::all(&cfg.auth.keys_dir).unwrap_or_else(|e| {
-        style::error(&format!("cannot read the upload keys: {e}"));
-        Vec::new()
-    });
+    // only encrypted chunks need keys, so a missing key is told about when one fails
+    let (keys, key_problem) = match crate::storage::crypt::Encryptor::all(&cfg.auth.keys_dir) {
+        Ok(keys) => (keys, None),
+        Err(e) => (Vec::new(), Some(e.to_string())),
+    };
     let rt = tokio::runtime::Runtime::new()?;
     let report = rt.block_on(crate::storage::restore::restore_app(
         &store,
@@ -865,14 +866,24 @@ pub fn storage_restore(
         days,
     ))?;
 
+    if report.listed == 0 {
+        return Err(crate::error::LogHavenError::Storage(format!(
+            "'{}' holds no objects for app '{app}' (check the app name and the target's prefix)",
+            chosen.name
+        )));
+    }
     for (name, why) in &report.failed {
         style::error(&format!("{name}: {why}"));
     }
+    if let (Some(problem), false) = (&key_problem, report.failed.is_empty()) {
+        style::error(&format!("cannot read the upload keys: {problem}"));
+    }
     style::success(&format!(
-        "Restored {} chunk(s) of '{app}' from '{}'; {} already on disk",
+        "Restored {} chunk(s) of '{app}' from '{}'; {} already on disk, {} object(s) skipped",
         report.restored.len(),
         chosen.name,
-        report.present
+        report.present,
+        report.skipped
     ));
     if cfg.storage.local.retention_days > 0 && !report.restored.is_empty() {
         style::info(&format!(
