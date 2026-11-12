@@ -6,6 +6,7 @@ pub mod local;
 pub mod pruner;
 pub mod query;
 pub mod record;
+pub mod restore;
 #[cfg(test)]
 mod storage_tests;
 mod stores;

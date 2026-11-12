@@ -731,19 +731,7 @@ pub fn dashboard(app: String, ttl_secs: u64, no_open: bool, profile: Option<&str
     Ok(())
 }
 
-/// `app/date/chunk.parquet`: what a chunk is named inside a store, and what its encryption is
-/// bound to. Anything else would only produce a misleading "damaged file" later.
-fn valid_chunk_name(name: &str) -> bool {
-    let parts: Vec<&str> = name.split('/').collect();
-    let [app, date, file] = parts.as_slice() else {
-        return false;
-    };
-    crate::storage::validate_app_name(app).is_ok()
-        && crate::storage::date::parse_date(date).is_some()
-        && file.ends_with(".parquet")
-        && file.len() > ".parquet".len()
-        && !file.contains(['\\', ':'])
-}
+use crate::storage::restore::valid_chunk_name;
 
 /// The name from the last three parts of a downloaded object's path.
 fn chunk_name_of(input: &std::path::Path) -> Option<String> {
@@ -808,6 +796,98 @@ pub fn storage_decrypt(
         output.display()
     ));
     Ok(())
+}
+
+pub fn storage_restore(
+    app: String,
+    target: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    profile: Option<&str>,
+) -> Result<()> {
+    let day = |flag: &str, v: Option<String>| -> Result<Option<i64>> {
+        v.map(|v| {
+            crate::storage::date::parse_date(&v).ok_or_else(|| {
+                crate::error::LogHavenError::Config(format!("--{flag} '{v}' is not YYYY-MM-DD"))
+            })
+        })
+        .transpose()
+    };
+    let days = crate::storage::restore::DayRange {
+        from: day("from", from)?,
+        to: day("to", to)?,
+    };
+    if let (Some(f), Some(t)) = (days.from, days.to)
+        && f > t
+    {
+        return Err(crate::error::LogHavenError::Config(
+            "--from is after --to".into(),
+        ));
+    }
+    let cfg = Config::load(&config::get_config_path(profile))?;
+    let targets = crate::storage::resolve_targets(&cfg)?;
+    let chosen = match (target.as_deref(), targets.as_slice()) {
+        (_, []) => {
+            return Err(crate::error::LogHavenError::Config(
+                "no upload target is configured, so there is nothing to restore from".into(),
+            ));
+        }
+        (Some(name), all) => all.iter().find(|t| t.name == name),
+        (None, [only]) => Some(only),
+        (None, all) => {
+            return Err(crate::error::LogHavenError::Config(format!(
+                "several targets are configured; pick one with --target ({})",
+                all.iter()
+                    .map(|t| t.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    }
+    .ok_or_else(|| {
+        crate::error::LogHavenError::Config(format!(
+            "no target named '{}'",
+            target.as_deref().unwrap_or_default()
+        ))
+    })?;
+
+    let store = crate::storage::cloud::Target::from_config(chosen)?;
+    let keys = crate::storage::crypt::Encryptor::all(&cfg.auth.keys_dir).unwrap_or_else(|e| {
+        style::error(&format!("cannot read the upload keys: {e}"));
+        Vec::new()
+    });
+    let rt = tokio::runtime::Runtime::new()?;
+    let report = rt.block_on(crate::storage::restore::restore_app(
+        &store,
+        &cfg.storage.local.path,
+        &keys,
+        &app,
+        days,
+    ))?;
+
+    for (name, why) in &report.failed {
+        style::error(&format!("{name}: {why}"));
+    }
+    style::success(&format!(
+        "Restored {} chunk(s) of '{app}' from '{}'; {} already on disk",
+        report.restored.len(),
+        chosen.name,
+        report.present
+    ));
+    if cfg.storage.local.retention_days > 0 && !report.restored.is_empty() {
+        style::info(&format!(
+            "retention_days is {}: the pruner removes restored chunks older than that again",
+            cfg.storage.local.retention_days
+        ));
+    }
+    if report.failed.is_empty() {
+        Ok(())
+    } else {
+        Err(crate::error::LogHavenError::Storage(format!(
+            "{} chunk(s) could not be restored",
+            report.failed.len()
+        )))
+    }
 }
 
 pub fn storage_rotate_key(profile: Option<&str>) -> Result<()> {
