@@ -36,7 +36,11 @@ jobs:
       - name: Install Playwright and Chromium
         run: |
           npm install --no-save --no-package-lock playwright@1.49.1
-          npx playwright install --with-deps chromium
+          for attempt in 1 2 3; do
+            npx playwright install chromium && exit 0
+            sleep 10
+          done
+          exit 1
       - name: Run end-to-end checks
         run: scripts/e2e.sh target/debug/loghaven
 

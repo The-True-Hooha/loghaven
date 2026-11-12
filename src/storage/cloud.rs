@@ -45,7 +45,23 @@ impl ObjectStore for S3Store {
     }
 }
 
-/// One upload destination.
+/// Everything the S3 adapter needs to reach one store.
+pub struct S3Settings {
+    /// Names the store in partial-upload markers, so keep it stable.
+    pub label: String,
+    pub bucket: String,
+    pub region: String,
+    pub prefix: Option<String>,
+    /// `None` is AWS.
+    pub endpoint: Option<String>,
+    pub path_style: bool,
+    pub access_key: String,
+    pub secret_key: String,
+}
+
+/// One upload destination. `ObjectStore` is the seam for a store that does not speak the S3 API
+/// (Azure Blob Storage, Google Cloud Storage's native API, SFTP): implement it and add a
+/// constructor and a config section next to `s3_compatible`.
 pub struct Target {
     /// Names the target's partial marker while several targets are in use.
     label: String,
@@ -62,42 +78,24 @@ impl Target {
         }
     }
 
-    fn s3_store(client: Client, bucket: String) -> Box<dyn ObjectStore> {
-        Box::new(S3Store { client, bucket })
-    }
-
-    pub fn s3(
-        bucket: String,
-        region: String,
-        prefix: Option<String>,
-        access_key: &str,
-        secret_key: &str,
-    ) -> Self {
-        let client = build_client(access_key, secret_key, region, None, false);
-        Self::new("s3", Self::s3_store(client, bucket), prefix)
-    }
-
-    pub fn r2(
-        bucket: String,
-        account_id: String,
-        prefix: Option<String>,
-        access_key: &str,
-        secret_key: &str,
-    ) -> Self {
-        let endpoint = format!("https://{}.r2.cloudflarestorage.com", account_id);
-        let client = build_client(access_key, secret_key, "auto".into(), Some(endpoint), false);
-        Self::new("r2", Self::s3_store(client, bucket), prefix)
-    }
-
-    pub fn minio(bucket: String, endpoint: String, access_key: &str, secret_key: &str) -> Self {
+    /// Any store that speaks the S3 API. AWS S3, Cloudflare R2 and MinIO are the same adapter
+    /// with different settings, as are Backblaze B2, Wasabi, DigitalOcean Spaces and Ceph.
+    pub fn s3_compatible(s: S3Settings) -> Self {
         let client = build_client(
-            access_key,
-            secret_key,
-            "us-east-1".into(),
-            Some(endpoint),
-            true,
+            &s.access_key,
+            &s.secret_key,
+            s.region,
+            s.endpoint,
+            s.path_style,
         );
-        Self::new("minio", Self::s3_store(client, bucket), None)
+        Self::new(
+            &s.label,
+            Box::new(S3Store {
+                client,
+                bucket: s.bucket,
+            }),
+            s.prefix,
+        )
     }
 
     pub fn label(&self) -> &str {
