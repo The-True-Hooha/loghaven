@@ -121,3 +121,15 @@ pub fn stellar_poll_interval_secs() -> u64 {
 pub fn stellar_max_records() -> u64 {
     100
 }
+
+pub fn remote_cache_mb() -> u64 {
+    1024
+}
+
+pub fn remote_fetch_mb() -> u64 {
+    256
+}
+
+pub fn remote_max_days() -> u32 {
+    14
+}

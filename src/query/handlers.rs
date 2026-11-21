@@ -1,7 +1,7 @@
 use crate::auth::token::verify_jwt;
 use crate::ipc::protocol::SessionData;
 use crate::query::QueryState;
-use crate::storage::query::{QueryFilter, query};
+use crate::storage::query::{QueryFilter, query_with_cache};
 use axum::{
     Json, Router,
     extract::{Query, State},
@@ -13,6 +13,12 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_LIMIT: usize = 1000;
 const MAX_LIMIT: usize = 10_000;
 const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
 
 pub fn routes() -> Router<QueryState> {
     Router::new()
@@ -81,6 +87,10 @@ pub struct LogsParams {
 pub struct LogsResponse {
     pub count: usize,
     pub records: Vec<crate::storage::record::LogRecord>,
+    /// Chunks that are only in the remote target could not all be fetched (a limit, a timeout or
+    /// an error), so the answer may lack records.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub remote_incomplete: bool,
 }
 
 pub async fn get_logs(
@@ -143,6 +153,14 @@ pub async fn get_logs(
         limit,
     };
 
+    let data_path = state.data_path.clone();
+    // a range with no start would mean listing the whole target
+    let mut remote_incomplete = false;
+    if let (Some(remote), Some(from)) = (&state.remote, filter.from_ms) {
+        let to = filter.to_ms.unwrap_or_else(now_ms);
+        remote_incomplete = remote.prepare(&data_path, &filter.app, from, to).await;
+    }
+    let cache = state.remote.as_ref().map(|r| r.cache_dir().to_path_buf());
     let permit = state.query_slots.clone().try_acquire_owned().map_err(|_| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -150,11 +168,10 @@ pub async fn get_logs(
         )
     })?;
 
-    let data_path = state.data_path.clone();
     // the permit moves into the blocking job, so it is held until the scan really ends
     let job = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        query(&data_path, &filter)
+        query_with_cache(&data_path, cache.as_deref(), &filter)
     });
     let records = tokio::time::timeout(QUERY_TIMEOUT, job)
         .await
@@ -168,6 +185,7 @@ pub async fn get_logs(
     Ok(Json(LogsResponse {
         count: records.len(),
         records,
+        remote_incomplete,
     }))
 }
 
@@ -190,6 +208,7 @@ mod tests {
             query_slots: Arc::new(tokio::sync::Semaphore::new(
                 crate::query::MAX_CONCURRENT_QUERIES,
             )),
+            remote: None,
         }
     }
 
@@ -246,6 +265,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ok.0.count, 0);
+    }
+
+    #[tokio::test]
+    async fn logs_reads_through_to_the_remote_target_for_days_not_on_disk() {
+        use crate::config::QueryConfig;
+        use crate::storage::cloud::{CloudSyncer, CrateStore, Target};
+        let mem = Arc::new(object_store::memory::InMemory::new());
+        let mk = || Target::new("mem", Box::new(CrateStore(mem.clone())), None);
+        let mut st = state_at("remote");
+        let ts = 1_704_110_400_000;
+        seed(&st, "web", &[(ts, "far away")]);
+        let syncer = CloudSyncer::with_targets(vec![mk()], st.data_path.clone(), true);
+        assert_eq!(syncer.sync_app(&st.data_path.join("web")).await, 0);
+
+        let ranged = || {
+            let mut p = params("web");
+            p.from_ms = Some(ts - 1000);
+            p.to_ms = Some(ts + 1000);
+            p
+        };
+        let off = get_logs(State(st.clone()), HeaderMap::new(), Query(ranged()))
+            .await
+            .unwrap();
+        assert_eq!(
+            off.0.count, 0,
+            "nothing is read through unless it is switched on"
+        );
+
+        let cache = std::env::temp_dir().join(format!("lh-h-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        st.remote = Some(Arc::new(crate::storage::remote::RemoteReader::new(
+            mk(),
+            cache.join("keys"),
+            cache.join("c"),
+            &QueryConfig::default(),
+        )));
+        let on = get_logs(State(st.clone()), HeaderMap::new(), Query(ranged()))
+            .await
+            .unwrap();
+        assert_eq!(on.0.count, 1);
+        assert_eq!(on.0.records[0].message, "far away");
+        assert!(!on.0.remote_incomplete);
+
+        let mut unbounded = params("web");
+        unbounded.from_ms = None;
+        let all = get_logs(State(st), HeaderMap::new(), Query(unbounded))
+            .await
+            .unwrap();
+        assert_eq!(
+            all.0.count, 1,
+            "the cache is read for any range, but only a range with a start fetches more"
+        );
     }
 
     #[tokio::test]

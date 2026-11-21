@@ -39,6 +39,29 @@ on any command to read `NAME.toml` instead of `config.toml`.
 | `query_port` | `9200` | HTTP port for `POST /auth` and `GET /logs` (`127.0.0.1`). |
 | `require_auth` | `true` | `false` makes ingest accept unsigned datagrams and the query API skip tokens. Development only: any local process can then read and write any app. |
 
+## `[query]`
+
+Off by default. With `remote_target` set, a query for days whose chunks are no longer on local disk fetches them from that storage target, so `delete_after_upload` does not put old data out of reach of a query that gives a start time. The limits below decide how much one query may fetch; what it cannot fetch is flagged, not hidden.
+
+| Key | Default | Notes |
+|-----|---------|-------|
+| `remote_target` | none | Name of a `[[storage.targets]]` entry. Off when not set. |
+| `remote_cache_mb` | `1024` | Disk the fetched chunks may use, in a directory beside the data directory (`<local.path>-remote-cache`). The least recently used chunks go first. |
+| `remote_fetch_mb` | `256` | Most one query may download. Must not be more than `remote_cache_mb`. |
+| `remote_max_days` | `14` | Most days one query may fetch; the newest days of the range are taken. |
+
+How it works:
+
+- Only a query with `from_ms` fetches. Without it the whole target would have to be listed, so such a query reads the local data and what is already cached. `to_ms` defaults to now.
+- For each day of the range the target is listed once, and the chunks that are neither on local disk nor in the cache are downloaded, decrypted (with the keys in `keys_dir` and `LOGHAVEN_STORAGE_KEY`) and checked, then queried together with the local chunks. A record found in both places is returned once.
+- A day is listed again when its last listing is older than a minute, until the listing is final: the day was over two days ago when listed, every chunk the target held was in the cache, and none was left to local disk (a chunk that is on disk now but could be pruned later keeps the day open). A final day is served from the cache from then on, so a chunk uploaded for it later (a late record, a restored copy of a lost chunk) is not seen until the cache drops one of that day's chunks.
+- The range is cut to days from 1970 to today; a day outside it has no data and costs no listing.
+- A query that hits a limit (`remote_fetch_mb`, `remote_max_days`), a 20 second fetch deadline, a missing storage key for an encrypted chunk, or a download error runs on what it has, and the answer carries `"remote_incomplete": true`; `loghaven logs` and the dashboard do not show that flag yet.
+- Fetches run one at a time. A query waits up to 20 seconds for the one in front of it, and then runs on what the cache has, flagged as incomplete. A chunk used within the last five minutes is never dropped from the cache, so a cache can pass its cap by what the last five minutes touched. On Windows a chunk dropped while a scan reads it is skipped with a warning.
+- A chunk that downloads but cannot be used (not Parquet, wrong key) is fetched again by the next query; the bytes it used count against that query's `remote_fetch_mb`. With no storage key found, encrypted chunks are not downloaded at all.
+- Each chunk is a whole-object download, a request per chunk and per listed day: with a cloud store that is billed, a wide range costs listings and egress. The limits above bound one query, not a day's queries.
+- The cache holds plain chunks, the same as local ones: do not point it at a shared or untrusted directory when `encrypt_uploads` is on.
+
 ## `[storage]`
 
 | Key | Default | Notes |
@@ -475,7 +498,7 @@ When a target gives its own credentials, nothing in the environment can change i
 
 **Tested with:** requests to local fake servers, which check the URL, headers and body each store type sends and that a big chunk goes up in parts (these run with the tests), and an in-process SSH/SFTP server over a real directory (real handshake, pinned host key, password check, upload and swap, listing, streamed download, a hung read); by hand, S3-style uploads, including a 20 MiB chunk in parts, to a local S3 server (moto) and Azure Blob Storage, including a 20 MiB chunk in parts, to the Azurite emulator, with credentials from environment variables, with encryption, and with one store down and back. Google Cloud Storage was only checked against the local fake server (the PUT it sends to the `gcs_base_url` of a service-account file) and a locally run `fake-gcs-server`, which accepts the connection but not the XML-API upload the crate uses, so a real upload to Google Cloud Storage is untested. WebDAV was run by hand against Apache `mod_dav` and SFTP against OpenSSH, both in containers: encrypted upload with `delete_after_upload`, `storage restore`, and queries over the restored data; SFTP also with a key login, a wrong password and a wrong host key. Real AWS, Azure and GCS accounts were not used.
 
-**Not covered:** stores that speak none of S3, Azure, Google, WebDAV or SFTP. The upload code calls a small `put`, `list` and `download`, so one more is an extra implementation of them and an extra `type`. Queries only ever read the local data directory, so with `delete_after_upload` uploaded data is not searchable until it is restored (below).
+**Not covered:** stores that speak none of S3, Azure, Google, WebDAV or SFTP. The upload code calls a small `put`, `list` and `download`, so one more is an extra implementation of them and an extra `type`. Queries read the local data directory, so with `delete_after_upload` uploaded data is not searchable until it is restored (below) or read through (`[query]`, below).
 
 ### Restoring chunks
 

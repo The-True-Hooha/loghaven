@@ -84,6 +84,7 @@ mod tests {
             data_path: std::env::temp_dir(),
             require_auth: true,
             query_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            remote: None,
         }
     }
 

@@ -6,6 +6,7 @@ pub mod local;
 pub mod pruner;
 pub mod query;
 pub mod record;
+pub mod remote;
 pub mod restore;
 pub(crate) mod sftp;
 #[cfg(test)]
@@ -934,6 +935,22 @@ credentials_file = "/nonexistent/sa.json"
 
     fn one_target(body: &str) -> Result<Config> {
         with_targets(&format!("[[storage.targets]]\nname = \"t\"\n{body}"))
+    }
+
+    #[test]
+    fn read_through_queries_need_a_real_target_and_limits_that_fit() {
+        let target = "[[storage.targets]]\nname = \"t\"\ntype = \"webdav\"\nurl = \"https://d.example.com\"\n";
+        let q = |body: &str| with_targets(&format!("{target}[query]\n{body}"));
+        assert!(q("remote_target = \"t\"\n").is_ok());
+        assert!(q("").is_ok(), "off unless a target is named");
+        let e = q("remote_target = \"other\"\n").unwrap_err().to_string();
+        assert!(e.contains("'other'"), "{e}");
+        assert!(q("remote_target = \"t\"\nremote_fetch_mb = 0\n").is_err());
+        assert!(q("remote_max_days = 0\n").is_err());
+        let e = q("remote_cache_mb = 10\nremote_fetch_mb = 11\n")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("must fit"), "{e}");
     }
 
     #[test]
