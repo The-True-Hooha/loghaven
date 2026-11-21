@@ -85,7 +85,7 @@ impl Daemon {
             }
         });
 
-        let query_server = QueryServer::new(&self.config, Arc::clone(&sessions));
+        let query_server = QueryServer::new(&self.config, Arc::clone(&sessions))?;
         tokio::spawn(async move {
             if let Err(e) = query_server.listen().await {
                 eprintln!("Query server error: {}", e);

@@ -50,7 +50,32 @@ fn validate_legacy_backend(config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn validate_query(config: &Config) -> Result<()> {
+    let q = &config.query;
+    if let Some(name) = &q.remote_target
+        && !crate::storage::resolve_targets(config)?
+            .iter()
+            .any(|t| &t.name == name)
+    {
+        return Err(LogHavenError::Config(format!(
+            "query.remote_target '{name}' is not the name of a storage target (with backend = \"local\" no target is used)"
+        )));
+    }
+    if q.remote_fetch_mb == 0 || q.remote_cache_mb == 0 || q.remote_max_days == 0 {
+        return Err(LogHavenError::Config(
+            "query.remote_cache_mb, remote_fetch_mb and remote_max_days must be above 0".into(),
+        ));
+    }
+    if q.remote_fetch_mb > q.remote_cache_mb {
+        return Err(LogHavenError::Config(
+            "query.remote_fetch_mb is more than remote_cache_mb: one query's chunks must fit in the cache".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_rest(config: &Config) -> Result<()> {
+    validate_query(config)?;
     match config.agent.log_level.as_str() {
         "trace" | "debug" | "info" | "warn" | "error" => {}
         level => {

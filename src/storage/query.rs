@@ -111,6 +111,24 @@ pub fn query(data_path: &Path, filter: &QueryFilter) -> Result<Vec<LogRecord>> {
     Ok(results)
 }
 
+/// `query` over the data directory and, when there is one, the cache of chunks fetched from a
+/// storage target. A record in both (a chunk restored after it was fetched) is returned once.
+pub fn query_with_cache(
+    data_path: &Path,
+    cache: Option<&Path>,
+    filter: &QueryFilter,
+) -> Result<Vec<LogRecord>> {
+    let mut all = query(data_path, filter)?;
+    let Some(cache) = cache else {
+        return Ok(all);
+    };
+    all.extend(query(cache, filter)?);
+    all.sort_by(newest_first);
+    all.dedup_by(|a, b| a.id == b.id);
+    trim_newest(&mut all, filter.limit, true);
+    Ok(all)
+}
+
 /// Newest first; equal timestamps break ties on the (time-ordered) id so the
 /// cut at `limit` is deterministic.
 fn newest_first(a: &LogRecord, b: &LogRecord) -> std::cmp::Ordering {

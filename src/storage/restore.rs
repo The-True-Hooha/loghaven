@@ -54,14 +54,14 @@ const MAX_PLAIN_BYTES: u64 = 16 << 30;
 /// authenticated once all of it is read, so it is decrypted in memory, and the bound is real.
 const MAX_SEALED_BYTES: u64 = 1 << 30;
 
-const RESTORE_PREFIX: &str = ".restore-";
-const RESTORE_SUFFIX: &str = ".part";
+pub(crate) const RESTORE_PREFIX: &str = ".restore-";
+pub(crate) const RESTORE_SUFFIX: &str = ".part";
 /// A temporary file idle this long is the leftover of a restore that died; one being filled is
 /// written to at least every `STALL_TIMEOUT`.
 const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Removes leftovers of earlier restores that were killed in the middle.
-fn sweep_stale(data_path: &Path, app: &str) {
+pub(crate) fn sweep_stale(data_path: &Path, app: &str) {
     for day in std::fs::read_dir(data_path.join(app))
         .into_iter()
         .flatten()
@@ -185,9 +185,9 @@ async fn fetch(
         "{RESTORE_PREFIX}{:016x}{RESTORE_SUFFIX}",
         rand::random::<u64>()
     ));
-    let staged = stage(target, object, name, sealed, keys, &tmp).await;
+    let staged = stage(target, object, name, sealed, keys, &tmp, u64::MAX).await;
     let published = match staged {
-        Ok(()) => publish(&tmp, chunk),
+        Ok(_) => publish(&tmp, chunk),
         Err(e) => Err(e),
     };
     let _ = std::fs::remove_file(&tmp);
@@ -200,22 +200,24 @@ async fn fetch(
     published
 }
 
-/// Leaves the plain, checked chunk in `tmp`.
-async fn stage(
+/// Leaves the plain, checked chunk in `tmp`, and returns how many bytes were downloaded, which
+/// never exceeds `limit`.
+pub(crate) async fn stage(
     target: &Target,
     object: &str,
     name: &str,
     sealed: bool,
     keys: &[Encryptor],
     tmp: &Path,
-) -> Result<()> {
+    limit: u64,
+) -> Result<u64> {
     use tokio::io::AsyncWriteExt;
     let cap = if sealed {
         MAX_SEALED_BYTES
     } else {
         MAX_PLAIN_BYTES
     };
-    target.download_named(object, tmp, cap).await?;
+    let downloaded = target.download_named(object, tmp, cap.min(limit)).await?;
     if sealed {
         let plain = decrypt_with(keys, name, &tokio::fs::read(tmp).await?)?;
         if !looks_like_parquet(&plain) {
@@ -227,7 +229,7 @@ async fn stage(
     } else if !file_looks_like_parquet(tmp)? {
         return Err(LogHavenError::Storage("not a Parquet file".into()));
     }
-    Ok(())
+    Ok(downloaded)
 }
 
 /// Puts the chunk in place so the daemon never sees it half done or unmarked: the marker goes

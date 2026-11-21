@@ -54,6 +54,37 @@ impl Default for AuthConfig {
     }
 }
 
+/// Reading chunks that are only in a storage target, on demand, for the queries that ask for them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryConfig {
+    /// Name of the `[[storage.targets]]` entry to read from. Off when not set.
+    #[serde(default)]
+    pub remote_target: Option<String>,
+
+    /// Most disk the chunks fetched from the target may use; the least recently used go first.
+    #[serde(default = "defaults::remote_cache_mb")]
+    pub remote_cache_mb: u64,
+
+    /// Most one query may download.
+    #[serde(default = "defaults::remote_fetch_mb")]
+    pub remote_fetch_mb: u64,
+
+    /// Most days one query may fetch; the newest ones of the range are taken.
+    #[serde(default = "defaults::remote_max_days")]
+    pub remote_max_days: u32,
+}
+
+impl Default for QueryConfig {
+    fn default() -> Self {
+        Self {
+            remote_target: None,
+            remote_cache_mb: defaults::remote_cache_mb(),
+            remote_fetch_mb: defaults::remote_fetch_mb(),
+            remote_max_days: defaults::remote_max_days(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
     #[serde(default = "defaults::socket_path")]
@@ -502,6 +533,9 @@ pub struct Config {
 
     #[serde(default)]
     pub auth: AuthConfig,
+
+    #[serde(default)]
+    pub query: QueryConfig,
 }
 
 pub fn get_config_path(profile: Option<&str>) -> PathBuf {
@@ -569,6 +603,7 @@ pub fn default_config() -> Config {
         storage: StorageConfig::default(),
         chains: ChainsConfig::default(),
         auth: AuthConfig::default(),
+        query: QueryConfig::default(),
     }
 }
 

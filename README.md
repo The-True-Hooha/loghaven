@@ -315,6 +315,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 - Done: persistent sessions across restarts
 - Done: `storage restore` copies chunks back from a cloud store
 - Done: WebDAV and SFTP upload targets
+- Done: read-through queries (`[query] remote_target`): days that are only in a storage target are fetched on demand into a size-capped cache
 - Column projection in queries, dedicated writer threads
 - Done: dual MIT OR Apache-2.0 license
 

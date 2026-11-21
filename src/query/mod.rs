@@ -16,6 +16,29 @@ pub struct QueryState {
     pub require_auth: bool,
     /// Bounds concurrent scans; each holds a blocking thread and reads whole chunks.
     pub query_slots: Arc<tokio::sync::Semaphore>,
+    /// Fetches chunks that are only in a storage target; off unless `query.remote_target` is set.
+    pub remote: Option<Arc<crate::storage::remote::RemoteReader>>,
+}
+
+/// The cache sits beside the data directory, not in it, so nothing that scans the data
+/// directory (the uploader, the pruner, a query) meets it.
+fn remote_reader(config: &Config) -> Result<Option<Arc<crate::storage::remote::RemoteReader>>> {
+    let Some(name) = &config.query.remote_target else {
+        return Ok(None);
+    };
+    let targets = crate::storage::resolve_targets(config)?;
+    let target = targets.iter().find(|t| &t.name == name).ok_or_else(|| {
+        LogHavenError::Config(format!("query.remote_target '{name}' is not a target"))
+    })?;
+    let data = &config.storage.local.path;
+    let mut cache = data.clone().into_os_string();
+    cache.push("-remote-cache");
+    Ok(Some(Arc::new(crate::storage::remote::RemoteReader::new(
+        crate::storage::cloud::Target::from_config(target)?,
+        config.auth.keys_dir.clone(),
+        cache.into(),
+        &config.query,
+    ))))
 }
 
 fn router(state: QueryState) -> Router {
@@ -34,13 +57,14 @@ pub struct QueryServer {
 }
 
 impl QueryServer {
-    pub fn new(config: &Config, sessions: Arc<SessionStore>) -> Self {
+    pub fn new(config: &Config, sessions: Arc<SessionStore>) -> Result<Self> {
+        let remote = remote_reader(config)?;
         let public_key_pem = {
             let pub_path = config.auth.keys_dir.join("public.pem");
             std::fs::read_to_string(&pub_path).ok()
         };
 
-        Self {
+        Ok(Self {
             port: config.auth.query_port,
             state: QueryState {
                 sessions,
@@ -48,8 +72,9 @@ impl QueryServer {
                 data_path: config.storage.local.path.clone(),
                 require_auth: config.auth.require_auth,
                 query_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_QUERIES)),
+                remote,
             },
-        }
+        })
     }
 
     pub async fn listen(&self) -> Result<()> {

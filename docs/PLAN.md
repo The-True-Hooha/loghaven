@@ -19,7 +19,7 @@ Everything below the line "Real-service tests" runs only after the build phases 
 - Stream downloads to the temporary file instead of holding the chunk in memory; replace the 1 GiB cap.
 - Paginate listings and scale the timeout with the object count.
 
-### Phase 3: remote data in queries (both options)
+### Phase 3: remote data in queries (both options) (done)
 - **A, kept:** `storage restore` copies chunks back explicitly.
 - **B, added:** read-through queries. A query for a time range that has no local chunks fetches the missing chunks from one configured target into a cache directory, decrypts them and queries them as usual. The cache has a size cap and evicts the least recently used chunks. Egress per query is capped. Off unless `query.remote_target` is set.
 
