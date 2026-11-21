@@ -14,15 +14,23 @@ SOAK=${SOAK_SECONDS:-60}
 AREA="Solana (test validator)"
 . "$ROOT/scripts/realtests/lib.sh"
 
-container lh-solana --platform linux/amd64 -p 18899:8899 --entrypoint sh lh-solana-test:2.3.13 -c \
-  'solana-keygen new --no-bip39-passphrase --silent -o /root/.config/solana/id.json && exec solana-test-validator --reset --quiet --ledger /ledger --rpc-port 8899 --rpc-bind-address 0.0.0.0'
+# The validator advertises one address for its transaction port, so it must be reached on that
+# address: the host's own network on Linux, where podman shares it. (On macOS the VM publishes a
+# port instead, and a validator under x86 emulation does not take transactions at all.)
+VALIDATOR='solana-keygen new --no-bip39-passphrase --silent -o /root/.config/solana/id.json && exec solana-test-validator --reset --quiet --ledger /ledger --rpc-port 8899'
+if [ "$(uname)" = Linux ]; then
+  RPC=http://127.0.0.1:8899
+  container lh-solana --platform linux/amd64 --network host --entrypoint sh lh-solana-test:2.3.13 -c "$VALIDATOR"
+else
+  RPC=http://127.0.0.1:18899
+  container lh-solana --platform linux/amd64 -p 18899:8899 --entrypoint sh lh-solana-test:2.3.13 -c "$VALIDATOR --bind-address \$(hostname -i | awk '{print \$1}')"
+fi
 WORK=$(mktemp -d /tmp/lhsolana.XXXXXX)
 WATCH_PID=
 stop_watch() { [ -n "$WATCH_PID" ] && kill "$WATCH_PID" 2>/dev/null; WATCH_PID=; }
 cleanup() { stop_watch; stop_daemon; drop_containers; [ "$FAILED" = 0 ] && rm -rf "$WORK" || echo "kept $WORK"; }
 trap cleanup EXIT
 
-RPC=http://127.0.0.1:18899
 sol() { podman_ exec lh-solana solana -u http://127.0.0.1:8899 "$@" 2>/dev/null; }
 keys() { podman_ exec lh-solana solana-keygen "$@" 2>/dev/null; }
 wait_for 180 'sol cluster-version >/dev/null' || { echo "the validator did not start"; podman_ logs lh-solana 2>&1 | tail; exit 1; }
