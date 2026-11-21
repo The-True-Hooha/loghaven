@@ -10,6 +10,7 @@ pub mod restore;
 #[cfg(test)]
 mod storage_tests;
 mod stores;
+pub(crate) mod webdav;
 pub(crate) use stores::host_takes_a_bucket_prefix;
 
 /// Tests that set environment variables, or build a store client (which reads them), hold this:

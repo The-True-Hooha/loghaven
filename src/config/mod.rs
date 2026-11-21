@@ -157,6 +157,17 @@ pub enum TargetKind {
         #[serde(default)]
         sas_token_env: Option<String>,
     },
+    /// A WebDAV server (Nextcloud, ownCloud, Apache `mod_dav`, `rclone serve webdav`, ...).
+    Webdav {
+        /// The collection uploads go under, `https://host/remote.php/dav/files/me/logs`.
+        url: String,
+        #[serde(default)]
+        username: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
+        #[serde(default)]
+        password_env: Option<String>,
+    },
     /// Google Cloud Storage, through its own API.
     Gcs {
         bucket: String,
@@ -195,6 +206,7 @@ impl TargetKind {
             Self::S3 { .. } => "s3",
             Self::Azure { .. } => "azure",
             Self::Gcs { .. } => "gcs",
+            Self::Webdav { .. } => "webdav",
         }
     }
 }

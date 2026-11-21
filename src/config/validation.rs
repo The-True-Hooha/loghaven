@@ -226,6 +226,21 @@ fn validate_targets(config: &Config) -> Result<()> {
                     return bad(format!("{at}: use an access key or a SAS token, not both"));
                 }
             }
+            super::TargetKind::Webdav {
+                url,
+                username,
+                password,
+                password_env,
+            } => {
+                check_endpoint(&format!("{at}.url"), url)?;
+                if username.as_deref().is_some_and(|u| u.trim().is_empty()) {
+                    return bad(format!("{at}: username is empty"));
+                }
+                one_source(&at, "password", password, password_env)?;
+                if username.is_some() != (password.is_some() || password_env.is_some()) {
+                    return bad(format!("{at}: give username and password together"));
+                }
+            }
             super::TargetKind::Gcs { bucket, .. } => {
                 if bucket.is_empty() {
                     return bad(format!("{at}: bucket is required"));
