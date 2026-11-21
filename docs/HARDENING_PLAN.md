@@ -48,7 +48,7 @@ Change:
 - The Parquet chunks are the source of truth. An index failure is logged with counts and does not fail the flush; text search must not depend on the index being complete (step 4).
 - After a failed flush, per-record flush triggers pause until the next tick or explicit flush. Pending records are capped by count (100k) and bytes (256 MiB), dropping the oldest.
 - `rotate_size_mb` is ignored (documented in the config struct).
-- Known limit, not fixed here: chunk I/O runs on the async worker thread (a dedicated writer thread or `spawn_blocking` is future work). Only one writer per app is possible because tantivy's index lock is taken first.
+- Chunk I/O runs in `spawn_blocking` (done after this plan was written). Only one writer per app is possible because tantivy's index lock is taken first.
 Tests: flush produces readable file, crash leftovers (`.tmp`) ignored and cleaned, rotate by record count, date rollover, unwritable directory does not kill the task, shutdown flushes.
 
 ## Step 4 - Query correctness
