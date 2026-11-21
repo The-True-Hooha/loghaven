@@ -86,5 +86,5 @@ check "every transfer of the soak is recorded exactly once" 'wait_for 60 "[ \"\$
 check "the watcher is still running" 'kill -0 "$WATCH_PID" 2>/dev/null'
 check "the watcher log has no error" '! grep -qi "error" "$WORK/watch.log" "$WORK/watch2.log"'
 
-[ "$FAILED" = 0 ] || { echo "-- validator log"; podman_ exec lh-solana sh -c 'tail -n 30 /ledger/validator.log' 2>&1 | cut -c1-200; }
+[ "$FAILED" = 0 ] || { echo "-- recorded: $(count solana) of $SENT sent"; "$BIN" logs solana --limit 20 2>&1 | cut -c1-200; echo "-- watcher"; head -20 "$WORK/watch.log" | cut -c1-200; echo "-- validator log"; podman_ exec lh-solana sh -c 'tail -n 30 /ledger/validator.log' 2>&1 | cut -c1-200; }
 summary
