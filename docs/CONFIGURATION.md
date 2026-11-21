@@ -330,7 +330,7 @@ How it behaves:
   `loghaven trace <hash> --app stellar --app web` lines it up with your own logs.
   The level is `error` for a failed transaction and `info` otherwise. Ledger, close
   time, fee charged, operation count, source account and memo are in `metadata`;
-  the memo is cut at 128 characters. The operations themselves are not fetched.
+  the memo is cut at 128 characters. The operations themselves are fetched only with `operations = true` (below).
 - Horizon only serves closed ledgers, which are final, so there is no reorg window
   and no `confirmations` setting.
 - The first run starts at each account's newest transaction and records nothing
