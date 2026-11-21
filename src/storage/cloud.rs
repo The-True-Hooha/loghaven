@@ -23,9 +23,79 @@ pub trait ObjectStore: Send + Sync {
         Box::pin(async { Err(LogHavenError::Storage("this store cannot be listed".into())) })
     }
 
-    /// The object's bytes; an object larger than `max_bytes` is refused before it is read.
-    fn get<'a>(&'a self, _key: &'a str, _max_bytes: u64) -> BoxFuture<'a, Result<Vec<u8>>> {
+    /// Streams the object into the new file `dest`, and returns how many bytes it holds. An
+    /// object larger than `max_bytes` is refused as soon as its size is known or exceeded, and a
+    /// transfer that stalls is given up. `dest` is left as it is on failure; the caller removes it.
+    fn download<'a>(
+        &'a self,
+        _key: &'a str,
+        _dest: &'a Path,
+        _max_bytes: u64,
+    ) -> BoxFuture<'a, Result<u64>> {
         Box::pin(async { Err(LogHavenError::Storage("this store cannot be read".into())) })
+    }
+}
+
+/// The most objects one listing may hold, give or take one directory.
+pub(crate) const MAX_LISTED: usize = 200_000;
+
+/// A transfer that moves no bytes for this long is given up.
+pub(crate) const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The file a download streams into, which refuses to grow past the size a chunk may have.
+pub(crate) struct Sink {
+    file: tokio::fs::File,
+    written: u64,
+    max_bytes: u64,
+}
+
+impl Sink {
+    pub(crate) async fn create(dest: &Path, max_bytes: u64) -> Result<Self> {
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dest)
+            .await
+            .map_err(|e| LogHavenError::Storage(format!("create {}: {e}", dest.display())))?;
+        Ok(Self {
+            file,
+            written: 0,
+            max_bytes,
+        })
+    }
+
+    pub(crate) fn refuse_if_larger(&self, size: u64) -> Result<()> {
+        if size > self.max_bytes {
+            return Err(LogHavenError::Storage(format!(
+                "object is {size} bytes, more than the {} a chunk may have",
+                self.max_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn push(&mut self, part: &[u8]) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        self.refuse_if_larger(self.written.saturating_add(part.len() as u64))?;
+        self.file
+            .write_all(part)
+            .await
+            .map_err(|e| LogHavenError::Storage(format!("write download: {e}")))?;
+        self.written += part.len() as u64;
+        Ok(())
+    }
+
+    pub(crate) async fn finish(mut self) -> Result<u64> {
+        use tokio::io::AsyncWriteExt;
+        self.file
+            .flush()
+            .await
+            .map_err(|e| LogHavenError::Storage(format!("write download: {e}")))?;
+        self.file
+            .sync_all()
+            .await
+            .map_err(|e| LogHavenError::Storage(format!("write download: {e}")))?;
+        Ok(self.written)
     }
 }
 
@@ -101,36 +171,59 @@ impl ObjectStore for CrateStore {
 
     fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
         Box::pin(async move {
-            use futures_util::TryStreamExt;
+            use futures_util::StreamExt;
             let path = parse_key(prefix)?;
-            let metas: Vec<_> = tokio::time::timeout(
-                PUT_TIMEOUT,
-                self.0.list(Some(&path)).try_collect::<Vec<_>>(),
-            )
-            .await
-            .map_err(|_| LogHavenError::Storage("listing the store timed out".into()))?
-            .map_err(|e| download_failed(&e))?;
-            Ok(metas.into_iter().map(|m| m.location.to_string()).collect())
+            let timed_out = || LogHavenError::Storage("listing the store timed out".into());
+            let mut pages = self.0.list(Some(&path));
+            let mut keys = Vec::new();
+            // each answer gets its own allowance, so a long listing is not cut short by a clock
+            // that was set for a short one
+            while let Some(meta) = tokio::time::timeout(STALL_TIMEOUT, pages.next())
+                .await
+                .map_err(|_| timed_out())?
+            {
+                if keys.len() >= MAX_LISTED {
+                    return Err(LogHavenError::Storage(
+                        "the listing is too large to restore from".into(),
+                    ));
+                }
+                keys.push(meta.map_err(|e| download_failed(&e))?.location.to_string());
+            }
+            Ok(keys)
         })
     }
 
-    fn get<'a>(&'a self, key: &'a str, max_bytes: u64) -> BoxFuture<'a, Result<Vec<u8>>> {
+    fn download<'a>(
+        &'a self,
+        key: &'a str,
+        dest: &'a Path,
+        max_bytes: u64,
+    ) -> BoxFuture<'a, Result<u64>> {
         Box::pin(async move {
+            use futures_util::StreamExt;
             use object_store::ObjectStoreExt;
             let path = parse_key(key)?;
-            let result = self.0.get(&path).await.map_err(|e| download_failed(&e))?;
-            if result.meta.size > max_bytes {
-                return Err(LogHavenError::Storage(format!(
-                    "object is {} bytes, more than the {max_bytes} a chunk may have",
-                    result.meta.size
-                )));
-            }
-            let budget = upload_budget(result.meta.size);
-            let bytes = tokio::time::timeout(budget, result.bytes())
+            let mut sink = Sink::create(dest, max_bytes).await?;
+            let stalled = || LogHavenError::Storage("download from cloud timed out".into());
+            let result = tokio::time::timeout(STALL_TIMEOUT, self.0.get(&path))
                 .await
-                .map_err(|_| LogHavenError::Storage("download from cloud timed out".into()))?
+                .map_err(|_| stalled())?
                 .map_err(|e| download_failed(&e))?;
-            Ok(bytes.to_vec())
+            sink.refuse_if_larger(result.meta.size)?;
+            let result_size = result.meta.size;
+            let mut body = result.into_stream();
+            let all = async {
+                while let Some(part) = tokio::time::timeout(STALL_TIMEOUT, body.next())
+                    .await
+                    .map_err(|_| stalled())?
+                {
+                    sink.push(&part.map_err(|e| download_failed(&e))?).await?;
+                }
+                sink.finish().await
+            };
+            tokio::time::timeout(upload_budget(result_size), all)
+                .await
+                .map_err(|_| stalled())?
         })
     }
 }
@@ -248,8 +341,10 @@ impl Target {
         self.store.put(&self.under_prefix(name), file).await
     }
 
-    pub async fn get_named(&self, name: &str, max_bytes: u64) -> Result<Vec<u8>> {
-        self.store.get(&self.under_prefix(name), max_bytes).await
+    pub async fn download_named(&self, name: &str, dest: &Path, max_bytes: u64) -> Result<u64> {
+        self.store
+            .download(&self.under_prefix(name), dest, max_bytes)
+            .await
     }
 
     fn under_prefix(&self, rel: &str) -> String {
@@ -499,7 +594,38 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::MockStore;
     use super::*;
+    use object_store::ObjectStoreExt;
     use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn a_download_is_streamed_into_a_new_file_and_never_onto_an_existing_one() {
+        let mem = Arc::new(object_store::memory::InMemory::new());
+        mem.put(&"a/b".into(), vec![9u8; 3000].into())
+            .await
+            .unwrap();
+        let store = CrateStore(mem);
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("out");
+        assert_eq!(store.download("a/b", &dest, 3000).await.unwrap(), 3000);
+        assert_eq!(std::fs::read(&dest).unwrap(), vec![9u8; 3000]);
+        let e = store.download("a/b", &dest, 3000).await.unwrap_err();
+        assert!(e.to_string().contains("create"), "{e}");
+        let e = store
+            .download("a/b", &d.path().join("small"), 2999)
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("more than the 2999"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_sink_stops_at_the_size_it_was_given() {
+        let d = tempfile::tempdir().unwrap();
+        let mut sink = Sink::create(&d.path().join("s"), 10).await.unwrap();
+        sink.push(&[0; 6]).await.unwrap();
+        sink.push(&[0; 4]).await.unwrap();
+        assert!(sink.push(&[0; 1]).await.is_err());
+        assert_eq!(sink.finish().await.unwrap(), 10);
+    }
 
     fn setup(
         name: &str,

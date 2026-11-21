@@ -1,5 +1,7 @@
 use crate::error::{LogHavenError, Result};
-use crate::storage::cloud::{BoxFuture, ObjectStore, PUT_TIMEOUT, upload_budget};
+use crate::storage::cloud::{
+    BoxFuture, MAX_LISTED, ObjectStore, STALL_TIMEOUT, Sink, upload_budget,
+};
 use russh::client;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg};
 use russh_sftp::client::SftpSession;
@@ -12,7 +14,6 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Part of the name of the file an upload is written to before it is renamed into place.
 const PART_MARK: &str = ".part-";
 const MAX_DEPTH: usize = 32;
-const MAX_LISTED: usize = 200_000;
 
 #[derive(Clone)]
 pub(crate) enum Login {
@@ -253,12 +254,15 @@ impl SftpStore {
                 if depth > MAX_DEPTH || files.len() > MAX_LISTED {
                     return Err(fail("list", "the listing is too deep or too large"));
                 }
-                if sftp.metadata(dir.clone()).await.is_err() {
+                let stat = tokio::time::timeout(STALL_TIMEOUT, sftp.metadata(dir.clone()))
+                    .await
+                    .map_err(|_| LogHavenError::Storage("listing the store timed out".into()))?;
+                if stat.is_err() {
                     continue;
                 }
-                let entries = sftp
-                    .read_dir(dir.clone())
+                let entries = tokio::time::timeout(STALL_TIMEOUT, sftp.read_dir(dir.clone()))
                     .await
+                    .map_err(|_| LogHavenError::Storage("listing the store timed out".into()))?
                     .map_err(|e| fail("list", e))?;
                 for entry in entries {
                     let name = entry.file_name();
@@ -279,33 +283,39 @@ impl SftpStore {
         .await
     }
 
-    async fn read(&self, key: &str, max_bytes: u64) -> Result<Vec<u8>> {
+    async fn read(&self, key: &str, dest: &Path, max_bytes: u64) -> Result<u64> {
+        let mut sink = Sink::create(dest, max_bytes).await?;
         self.with_session(async |sftp| {
             let path = self.remote(key);
-            let too_big = || {
-                fail(
-                    "read",
-                    format!("object is larger than the {max_bytes} bytes a chunk may have"),
-                )
-            };
-            let size = sftp
-                .metadata(path.clone())
+            let stalled = || LogHavenError::Storage("download from cloud timed out".into());
+            let size = tokio::time::timeout(STALL_TIMEOUT, sftp.metadata(path.clone()))
                 .await
+                .map_err(|_| stalled())?
                 .map_err(|e| fail("read", e))?
                 .size;
-            if size.is_some_and(|n| n > max_bytes) {
-                return Err(too_big());
+            if let Some(n) = size {
+                sink.refuse_if_larger(n)?;
             }
-            let file = sftp.open(path).await.map_err(|e| fail("read", e))?;
-            let mut out = Vec::new();
-            file.take(max_bytes + 1)
-                .read_to_end(&mut out)
+            let mut file = tokio::time::timeout(STALL_TIMEOUT, sftp.open(path))
                 .await
+                .map_err(|_| stalled())?
                 .map_err(|e| fail("read", e))?;
-            if out.len() as u64 > max_bytes {
-                return Err(too_big());
-            }
-            Ok(out)
+            let mut buf = vec![0u8; 256 * 1024];
+            let all = async {
+                loop {
+                    let n = tokio::time::timeout(STALL_TIMEOUT, file.read(&mut buf))
+                        .await
+                        .map_err(|_| stalled())?
+                        .map_err(|e| fail("read", e))?;
+                    if n == 0 {
+                        return sink.finish().await;
+                    }
+                    sink.push(&buf[..n]).await?;
+                }
+            };
+            tokio::time::timeout(upload_budget(size.unwrap_or(max_bytes)), all)
+                .await
+                .map_err(|_| stalled())?
         })
         .await
     }
@@ -381,19 +391,16 @@ impl ObjectStore for SftpStore {
     }
 
     fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
-        Box::pin(async move {
-            tokio::time::timeout(PUT_TIMEOUT, self.walk(prefix))
-                .await
-                .map_err(|_| LogHavenError::Storage("listing the store timed out".into()))?
-        })
+        Box::pin(self.walk(prefix))
     }
 
-    fn get<'a>(&'a self, key: &'a str, max_bytes: u64) -> BoxFuture<'a, Result<Vec<u8>>> {
-        Box::pin(async move {
-            tokio::time::timeout(upload_budget(max_bytes), self.read(key, max_bytes))
-                .await
-                .map_err(|_| LogHavenError::Storage("download from cloud timed out".into()))?
-        })
+    fn download<'a>(
+        &'a self,
+        key: &'a str,
+        dest: &'a Path,
+        max_bytes: u64,
+    ) -> BoxFuture<'a, Result<u64>> {
+        Box::pin(self.read(key, dest, max_bytes))
     }
 }
 
