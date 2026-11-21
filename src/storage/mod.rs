@@ -7,6 +7,7 @@ pub mod pruner;
 pub mod query;
 pub mod record;
 pub mod restore;
+pub(crate) mod sftp;
 #[cfg(test)]
 mod storage_tests;
 mod stores;
@@ -925,6 +926,83 @@ credentials_file = "/nonexistent/sa.json"
         let mut cfg = two_stores("s3", None);
         cfg.storage.s3.as_mut().unwrap().endpoint = Some("https://s3.example.com".into());
         assert!(!s3_of(&cfg, "s3").3);
+    }
+
+    const FP: &str = "SHA256:J97WPuw9rEUpEiIpD76rPocvDq1EGWZKBPBVsiJuadI";
+
+    fn one_target(body: &str) -> Result<Config> {
+        with_targets(&format!("[[storage.targets]]\nname = \"t\"\n{body}"))
+    }
+
+    #[test]
+    fn webdav_targets_need_a_url_and_a_complete_login() {
+        let ok = "type = \"webdav\"\nurl = \"https://dav.example.com/logs\"\nusername = \"u\"\npassword_env = \"P\"\n";
+        assert!(one_target(ok).is_ok());
+        assert!(one_target("type = \"webdav\"\nurl = \"https://dav.example.com\"\n").is_ok());
+        for (bad, expect) in [
+            (
+                "type = \"webdav\"\nurl = \"ftp://x\"\n",
+                "http:// or https://",
+            ),
+            (
+                "type = \"webdav\"\nurl = \"https://h\"\nusername = \"u\"\n",
+                "username and password together",
+            ),
+            (
+                "type = \"webdav\"\nurl = \"https://h\"\npassword = \"p\"\n",
+                "username and password together",
+            ),
+            (
+                "type = \"webdav\"\nurl = \"https://h\"\nusername = \"u\"\npassword = \"p\"\npassword_env = \"P\"\n",
+                "not both",
+            ),
+            (
+                "type = \"webdav\"\nurl = \"https://h\"\nusernme = \"u\"\n",
+                "usernme",
+            ),
+        ] {
+            let e = one_target(bad).unwrap_err().to_string();
+            assert!(e.contains(expect), "{bad:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn sftp_targets_need_a_pinned_host_key_and_exactly_one_way_to_log_in() {
+        let base =
+            format!("type = \"sftp\"\nhost = \"h\"\nusername = \"u\"\nhost_key = \"{FP}\"\n");
+        assert!(one_target(&format!("{base}password_env = \"P\"\n")).is_ok());
+        assert!(one_target(&format!("{base}key_file = \"/k\"\nkey_passphrase_env = \"K\"\npath = \"up/logs\"\nport = 2222\n")).is_ok());
+        for (extra, expect) in [
+            ("", "a key_file or a password"),
+            (
+                "key_file = \"/k\"\npassword = \"p\"\n",
+                "a key_file or a password",
+            ),
+            (
+                "password = \"p\"\nkey_passphrase_env = \"K\"\n",
+                "needs a key_file",
+            ),
+            ("password = \"p\"\nport = 0\n", "port"),
+            (
+                "password = \"p\"\npath = \"../x\"\n",
+                "prefix must be plain",
+            ),
+        ] {
+            let e = one_target(&format!("{base}{extra}"))
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(expect), "{extra:?}: {e}");
+        }
+        for key in [
+            "",
+            "host_key = \"MD5:aa\"\n",
+            "host_key = \"SHA256:short\"\n",
+        ] {
+            let body =
+                format!("type = \"sftp\"\nhost = \"h\"\nusername = \"u\"\npassword = \"p\"\n{key}");
+            let e = one_target(&body).unwrap_err().to_string();
+            assert!(e.contains("host_key"), "{key:?}: {e}");
+        }
     }
 
     #[test]

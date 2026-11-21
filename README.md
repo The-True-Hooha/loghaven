@@ -314,6 +314,7 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 - Done: multiple simultaneous storage targets (`[[storage.targets]]`: S3 and compatible stores, Azure Blob Storage, Google Cloud Storage; `secondary` still works for the older settings)
 - Done: persistent sessions across restarts
 - Done: `storage restore` copies chunks back from a cloud store
+- Done: WebDAV and SFTP upload targets
 - Column projection in queries, dedicated writer threads
 - Done: dual MIT OR Apache-2.0 license
 

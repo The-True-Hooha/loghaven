@@ -177,6 +177,48 @@ impl Target {
                     username.clone().zip(password),
                 )?)
             }
+            crate::config::TargetKind::Sftp {
+                host,
+                port,
+                username,
+                host_key,
+                key_file,
+                key_passphrase_env,
+                password,
+                password_env,
+                path,
+            } => {
+                use crate::storage::sftp::{Login, SftpStore};
+                let password =
+                    crate::storage::stores::secret(&t.name, "password", password, password_env)?;
+                let passphrase = crate::storage::stores::secret(
+                    &t.name,
+                    "key_passphrase",
+                    &None,
+                    key_passphrase_env,
+                )?;
+                let login = match (key_file, password) {
+                    (Some(file), None) => Login::Key {
+                        file: file.into(),
+                        passphrase,
+                    },
+                    (None, Some(pw)) => Login::Password(pw),
+                    _ => {
+                        return Err(LogHavenError::Config(format!(
+                            "storage target '{}': give a key_file or a password",
+                            t.name
+                        )));
+                    }
+                };
+                Box::new(SftpStore::new(
+                    host,
+                    *port,
+                    username,
+                    login,
+                    host_key,
+                    path.as_deref().unwrap_or(""),
+                ))
+            }
             _ => Box::new(CrateStore(crate::storage::stores::build(t)?)),
         };
         Ok(Self::new(&t.name, store, t.prefix.clone()))

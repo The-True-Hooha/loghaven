@@ -209,7 +209,7 @@ pub fn build(t: &StorageTarget) -> Result<Arc<dyn ObjectStore>> {
             }
             Ok(Arc::new(b.build().map_err(built)?))
         }
-        TargetKind::Webdav { .. } => Err(config_err(
+        TargetKind::Webdav { .. } | TargetKind::Sftp { .. } => Err(config_err(
             name,
             "this target type is not served by the object_store crate".into(),
         )),
