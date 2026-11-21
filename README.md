@@ -314,7 +314,8 @@ LogHaven is pre-1.0. Work ships in phases; each phase is a release batch.
 - Done: multiple simultaneous storage targets (`[[storage.targets]]`: S3 and compatible stores, Azure Blob Storage, Google Cloud Storage; `secondary` still works for the older settings)
 - Done: persistent sessions across restarts
 - Done: `storage restore` copies chunks back from a cloud store
-- Column projection in queries, dedicated writer threads
+- Done: column projection in queries; each app has its own writer task, with the disk work on blocking threads
+- Open work and the real-service test plan: [docs/PLAN.md](docs/PLAN.md)
 - Done: dual MIT OR Apache-2.0 license
 
 Details of the completed hardening work are in [docs/HARDENING_PLAN.md](docs/HARDENING_PLAN.md).
