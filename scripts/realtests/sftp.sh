@@ -13,7 +13,9 @@ AREA="SFTP (OpenSSH)"
 . "$ROOT/scripts/realtests/lib.sh"
 
 PORT=19022
-WORK=$(mktemp -d /private/tmp/lhsftp.XXXXXX)
+# podman on macOS shares /private/tmp with its machine, not /tmp
+MOUNT_BASE=/tmp; [ -d /private/tmp ] && MOUNT_BASE=/private/tmp
+WORK=$(mktemp -d "$MOUNT_BASE/lhsftp.XXXXXX")
 ssh-keygen -q -t ed25519 -N "" -f "$WORK/id" >/dev/null
 mkdir -p "$WORK/pub"; cp "$WORK/id.pub" "$WORK/pub/id.pub"
 container lh-sftp -p $PORT:22 -v "$WORK/pub:/home/lh/.ssh/keys:ro" \
