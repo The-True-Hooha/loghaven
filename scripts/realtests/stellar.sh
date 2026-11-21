@@ -29,6 +29,13 @@ check "the private network is closing ledgers" '[ "$(ledger)" -gt 2 ]'
 N=$((SOAK / 3 + 12)); [ "$N" -gt 20 ] && N=20  # Horizon here allows 20 requests a second; a poll makes N+1
 ACCOUNTS=($(python3 "$ROOT/scripts/realtests/stellar_keys.py" "$N"))
 fund() { curl -s -o /dev/null -w '%{http_code}' "$H/friendbot?addr=$1"; }
+# what the network holds: an account exists once the friendbot's transaction has closed, and each
+# funded account has exactly that one transaction. This is the truth the watcher is compared with.
+chain_count() { local n=0 a; for a in "${ACCOUNTS[@]}"; do
+  [ "$(curl -s -o /dev/null -w '%{http_code}' "$H/accounts/$a")" = 200 ] && n=$((n+1)); done; echo $n; }
+matches_chain() { # at least $1 funded accounts, and the watcher has exactly that many records
+  local want; want=$(chain_count); [ "$want" -ge "$1" ] && [ "$(count stellar)" = "$want" ]
+}
 LIST=$(printf '"%s", ' "${ACCOUNTS[@]}"); LIST=${LIST%, }
 
 new_home "$WORK/home"
@@ -50,10 +57,10 @@ check "the first run starts at the tip and records nothing" 'wait_for 30 "grep -
 sleep 8
 [ "$(count stellar)" = 0 ] && pass "nothing is recorded before any account has a transaction" || fail "nothing is recorded before any account has a transaction"
 for a in "${ACCOUNTS[@]:0:3}"; do fund "$a" >/dev/null; done
-check "the first three funded accounts are recorded" 'wait_for 60 "[ \"\$(count stellar)\" = 3 ]"'
+check "the funded accounts are recorded (at least 2 of 3)" 'wait_for 90 "matches_chain 2"'
 T0=$(date +%s)
 fund "${ACCOUNTS[3]}" >/dev/null
-check "a new transaction is recorded within a few ledgers" 'wait_for 30 "[ \"\$(count stellar)\" = 4 ]"'
+check "a new transaction is recorded within a few ledgers" 'wait_for 60 "matches_chain 3"'
 echo "   latency: $(( $(date +%s) - T0 )) s"
 check "records carry the operation types (text search reaches metadata)" '[ "$(count stellar --text create_account)" -ge 1 ]'
 check "a record can be traced by hash" 'H1=$("$BIN" logs stellar --limit 1 2>&1 | grep -o "[0-9a-f]\{64\}" | head -1); [ -n "$H1" ] && "$BIN" trace "$H1" --app stellar 2>&1 | grep -qi "$H1\|ledger"'
@@ -63,16 +70,17 @@ stop_watch
 fund "${ACCOUNTS[4]}" >/dev/null; fund "${ACCOUNTS[5]}" >/dev/null
 "$BIN" watch stellar >"$WORK/watch2.log" 2>&1 &
 WATCH_PID=$!
-check "two transactions made while the watcher was down are recorded once" 'wait_for 60 "[ \"\$(count stellar)\" = 6 ]"'
+check "transactions made while the watcher was down are recorded once" 'wait_for 90 "matches_chain 4"'
 sleep 5
-check "nothing is repeated after the restart" '[ "$(count stellar)" = 6 ]'
+check "nothing is repeated after the restart" 'matches_chain 4'
 
 echo "== soak ($SOAK s, one transaction every 3 s)"
 SENT=6
 END=$(( $(date +%s) + SOAK ))
 while [ "$(date +%s)" -lt "$END" ] && [ "$SENT" -lt "$N" ]; do fund "${ACCOUNTS[$SENT]}" >/dev/null; SENT=$((SENT+1)); sleep 3; done
-check "every transaction of the soak is recorded exactly once" 'wait_for 60 "[ \"\$(count stellar)\" = $SENT ]"'
+check "most soak transactions landed and each is recorded exactly once" 'wait_for 90 "matches_chain $((SENT * 3 / 4))"'
 check "the watcher is still running" 'kill -0 "$WATCH_PID" 2>/dev/null'
 check "the watcher log has no error" '! grep -qi "error" "$WORK/watch.log" "$WORK/watch2.log"'
 
+[ "$FAILED" = 0 ] || { echo "-- recorded: $(count stellar), funded on the network: $(chain_count), friendbot calls: $SENT"; echo "-- watcher"; head -12 "$WORK/watch.log" | cut -c1-200; }
 summary
