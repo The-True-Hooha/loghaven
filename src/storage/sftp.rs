@@ -467,4 +467,137 @@ mod tests {
             "web/a.parquet"
         );
     }
+
+    use crate::storage::sftp_server::{self, PASSWORD, USER};
+
+    async fn live(dir: &Path) -> (SftpStore, String) {
+        live_with(dir, false).await
+    }
+
+    async fn live_with(dir: &Path, stall_reads: bool) -> (SftpStore, String) {
+        let server = sftp_server::start_with(stall_reads).await;
+        let root = dir.join("up").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&root).unwrap();
+        let st = SftpStore::new(
+            "127.0.0.1",
+            server.port,
+            USER,
+            Login::Password(PASSWORD.into()),
+            &server.fingerprint,
+            &root,
+        );
+        (st, root)
+    }
+
+    fn names(dir: &str) -> Vec<String> {
+        let mut out = vec![];
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(names(&p.to_string_lossy()));
+            } else {
+                out.push(e.file_name().to_string_lossy().into_owned());
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[tokio::test]
+    async fn an_object_goes_up_is_listed_and_comes_back_through_a_real_ssh_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (st, root) = live(tmp.path()).await;
+        let src = tmp.path().join("c.parquet");
+        std::fs::write(&src, vec![5u8; 600_000]).unwrap();
+        st.put("web/2024-01-01/c.parquet", &src).await.unwrap();
+        assert_eq!(names(&root), ["c.parquet"], "no temporary file is left");
+        assert_eq!(st.list("web/").await.unwrap(), ["web/2024-01-01/c.parquet"]);
+        let dest = tmp.path().join("down");
+        let n = st
+            .download("web/2024-01-01/c.parquet", &dest, 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(n, 600_000);
+        assert_eq!(std::fs::read(&dest).unwrap(), vec![5u8; 600_000]);
+    }
+
+    #[tokio::test]
+    async fn an_upload_over_an_existing_object_replaces_it_and_leaves_nothing_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (st, root) = live(tmp.path()).await;
+        let src = tmp.path().join("c.parquet");
+        for body in [&b"first"[..], &b"second one"[..]] {
+            std::fs::write(&src, body).unwrap();
+            st.put("web/2024-01-01/c.parquet", &src).await.unwrap();
+        }
+        assert_eq!(names(&root), ["c.parquet"]);
+        assert_eq!(
+            std::fs::read(format!("{root}/web/2024-01-01/c.parquet")).unwrap(),
+            b"second one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_leftover_of_a_cut_upload_is_hidden_and_a_big_object_is_refused_unread() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (st, root) = live(tmp.path()).await;
+        let src = tmp.path().join("c.parquet");
+        std::fs::write(&src, vec![1u8; 100]).unwrap();
+        st.put("web/2024-01-01/c.parquet", &src).await.unwrap();
+        std::fs::write(
+            format!("{root}/web/2024-01-01/c.parquet.part-0123456789abcdef"),
+            b"half",
+        )
+        .unwrap();
+        assert_eq!(st.list("web/").await.unwrap(), ["web/2024-01-01/c.parquet"]);
+        let dest = tmp.path().join("down");
+        let e = st
+            .download("web/2024-01-01/c.parquet", &dest, 50)
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("more than the 50"), "{e}");
+        assert_eq!(std::fs::metadata(&dest).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_wrong_password_and_a_wrong_host_key_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (good, _) = live(tmp.path()).await;
+        let src = tmp.path().join("c.parquet");
+        std::fs::write(&src, b"x").unwrap();
+        let wrong_password = SftpStore::new(
+            &good.host,
+            good.port,
+            USER,
+            Login::Password("nope".into()),
+            &good.host_key,
+            &good.root,
+        );
+        let e = wrong_password.put("a/b/c.parquet", &src).await.unwrap_err();
+        assert!(!e.to_string().contains("nope"), "{e}");
+        let wrong_key = SftpStore::new(
+            &good.host,
+            good.port,
+            USER,
+            Login::Password(PASSWORD.into()),
+            &format!("SHA256:{}", "A".repeat(43)),
+            &good.root,
+        );
+        let e = wrong_key.put("a/b/c.parquet", &src).await.unwrap_err();
+        assert!(e.to_string().contains("host key"), "{e}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_server_that_stops_answering_reads_does_not_hold_the_download() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (st, root) = live_with(tmp.path(), true).await;
+        std::fs::create_dir_all(format!("{root}/web/2024-01-01")).unwrap();
+        std::fs::write(format!("{root}/web/2024-01-01/c.parquet"), vec![1u8; 1000]).unwrap();
+        let dest = tmp.path().join("down");
+        let e = st
+            .download("web/2024-01-01/c.parquet", &dest, 1 << 20)
+            .await
+            .unwrap_err();
+        assert!(e.to_string().to_lowercase().contains("time"), "{e}");
+    }
 }
