@@ -68,10 +68,10 @@ WATCH_PID=$!
 check "the watcher starts" 'wait_for 30 "grep -q Watching $WORK/watch.log"'
 sleep 6
 for _ in 1 2 3; do send; done
-check "the transfers that landed are recorded (at least 2 of 3)" 'wait_for 90 "matches_chain 2"'
+check "the transfers that landed are recorded (at least 2 of 3)" 'wait_for 90 "matches_chain 2" || { echo "   chain=$(chain_count) watcher=$(count solana)"; false; }'
 T0=$(date +%s)
 send
-check "a new transfer is recorded within a few polls" 'wait_for 60 "matches_chain 3"'
+check "a new transfer is recorded within a few polls" 'wait_for 60 "matches_chain 3" || { echo "   chain=$(chain_count) watcher=$(count solana)"; false; }'
 echo "   latency: $(( $(date +%s) - T0 )) s"
 SIG=$("$BIN" logs solana --limit 1 2>&1 | grep -o '[1-9A-HJ-NP-Za-km-z]\{80,90\}' | head -1)
 check "a record can be traced by signature" '[ -n "$SIG" ] && "$BIN" trace "$SIG" --app solana 2>&1 | grep -q "slot"'
@@ -81,15 +81,15 @@ stop_watch
 send; send
 "$BIN" watch solana >"$WORK/watch2.log" 2>&1 &
 WATCH_PID=$!
-check "transfers made while the watcher was down are recorded once" 'wait_for 90 "matches_chain 4"'
+check "transfers made while the watcher was down are recorded once" 'wait_for 90 "matches_chain 4" || { echo "   chain=$(chain_count) watcher=$(count solana)"; false; }'
 sleep 6
-check "nothing is repeated after the restart" 'matches_chain 4'
+check "nothing is repeated after the restart" 'matches_chain 4 || { echo "   chain=$(chain_count) watcher=$(count solana)"; false; }'
 
 echo "== soak ($SOAK s, one transfer every 2 s)"
 SENT=6
 END=$(( $(date +%s) + SOAK ))
 while [ "$(date +%s)" -lt "$END" ]; do send && SENT=$((SENT+1)); sleep 2; done
-check "most soak transfers landed and each is recorded exactly once" 'wait_for 90 "matches_chain $((SENT * 3 / 4))"'
+check "most soak transfers landed and each is recorded exactly once" 'wait_for 90 "matches_chain $((SENT * 3 / 4))" || { echo "   chain=$(chain_count) watcher=$(count solana)"; false; }'
 check "the watcher is still running" 'kill -0 "$WATCH_PID" 2>/dev/null'
 check "the watcher log has no error" '! grep -qi "error" "$WORK/watch.log" "$WORK/watch2.log"'
 
