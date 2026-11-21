@@ -1,5 +1,7 @@
 use crate::error::{LogHavenError, Result};
-use crate::storage::cloud::{BoxFuture, ObjectStore, PUT_TIMEOUT, upload_budget};
+use crate::storage::cloud::{
+    BoxFuture, MAX_LISTED, ObjectStore, STALL_TIMEOUT, Sink, upload_budget,
+};
 use reqwest::{Method, StatusCode, Url};
 use std::collections::HashSet;
 use std::path::Path;
@@ -16,7 +18,6 @@ pub(crate) struct WebDavStore {
 
 const MAX_LISTING_BYTES: usize = 16 << 20;
 const MAX_DEPTH: usize = 32;
-const MAX_LISTED: usize = 200_000;
 
 /// The path of a URL as the server means it: percent-decoded, no trailing slash.
 fn decoded_path(url: &Url) -> String {
@@ -204,7 +205,10 @@ impl WebDavStore {
             if depth > MAX_DEPTH || files.len() > MAX_LISTED {
                 return Err(fail("PROPFIND", "the listing is too deep or too large"));
             }
-            for (key, is_collection) in self.children(&dir).await? {
+            let answer = tokio::time::timeout(STALL_TIMEOUT, self.children(&dir))
+                .await
+                .map_err(|_| LogHavenError::Storage("listing the store timed out".into()))??;
+            for (key, is_collection) in answer {
                 if is_collection {
                     todo.push((key, depth + 1));
                 } else {
@@ -217,32 +221,36 @@ impl WebDavStore {
         Ok(files)
     }
 
-    async fn read(&self, key: &str, max_bytes: u64) -> Result<Vec<u8>> {
-        let mut resp = self
-            .request(Method::GET, self.url(key, false)?)
-            .send()
-            .await
-            .map_err(|e| transport("GET", e))?;
+    async fn read(&self, key: &str, dest: &Path, max_bytes: u64) -> Result<u64> {
+        let mut sink = Sink::create(dest, max_bytes).await?;
+        let stalled = || LogHavenError::Storage("download from cloud timed out".into());
+        let mut resp = tokio::time::timeout(
+            STALL_TIMEOUT,
+            self.request(Method::GET, self.url(key, false)?).send(),
+        )
+        .await
+        .map_err(|_| stalled())?
+        .map_err(|e| transport("GET", e))?;
         if !resp.status().is_success() {
             return Err(status("GET", resp.status()));
         }
-        let too_big = || {
-            fail(
-                "GET",
-                format!("object is larger than the {max_bytes} bytes a chunk may have"),
-            )
-        };
-        if resp.content_length().is_some_and(|n| n > max_bytes) {
-            return Err(too_big());
+        if let Some(n) = resp.content_length() {
+            sink.refuse_if_larger(n)?;
         }
-        let mut out = Vec::new();
-        while let Some(part) = resp.chunk().await.map_err(|e| transport("GET", e))? {
-            if out.len() as u64 + part.len() as u64 > max_bytes {
-                return Err(too_big());
+        let budget = upload_budget(resp.content_length().unwrap_or(max_bytes));
+        let all = async {
+            while let Some(part) = tokio::time::timeout(STALL_TIMEOUT, resp.chunk())
+                .await
+                .map_err(|_| stalled())?
+                .map_err(|e| transport("GET", e))?
+            {
+                sink.push(&part).await?;
             }
-            out.extend_from_slice(&part);
-        }
-        Ok(out)
+            sink.finish().await
+        };
+        tokio::time::timeout(budget, all)
+            .await
+            .map_err(|_| stalled())?
     }
 }
 
@@ -310,19 +318,16 @@ impl ObjectStore for WebDavStore {
     }
 
     fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
-        Box::pin(async move {
-            tokio::time::timeout(PUT_TIMEOUT, self.walk(prefix))
-                .await
-                .map_err(|_| LogHavenError::Storage("listing the store timed out".into()))?
-        })
+        Box::pin(self.walk(prefix))
     }
 
-    fn get<'a>(&'a self, key: &'a str, max_bytes: u64) -> BoxFuture<'a, Result<Vec<u8>>> {
-        Box::pin(async move {
-            tokio::time::timeout(upload_budget(max_bytes), self.read(key, max_bytes))
-                .await
-                .map_err(|_| LogHavenError::Storage("download from cloud timed out".into()))?
-        })
+    fn download<'a>(
+        &'a self,
+        key: &'a str,
+        dest: &'a Path,
+        max_bytes: u64,
+    ) -> BoxFuture<'a, Result<u64>> {
+        Box::pin(self.read(key, dest, max_bytes))
     }
 }
 
@@ -492,12 +497,13 @@ mod tests {
             listed,
             ["web/2024-01-01/a b.parquet", "web/2024-01-02/c.parquet"]
         );
-        assert_eq!(
-            t.get_named("web/2024-01-01/a b.parquet", 1 << 20)
-                .await
-                .unwrap(),
-            b"chunk bytes"
-        );
+        let dest = tmp.path().join("down");
+        let n = t
+            .download_named("web/2024-01-01/a b.parquet", &dest, 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(n, 11);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"chunk bytes");
     }
 
     /// A server that answers every request the same way.
@@ -516,6 +522,28 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         format!("127.0.0.1:{}", addr.port())
+    }
+
+    #[tokio::test]
+    async fn a_body_with_no_length_is_cut_off_at_the_size_a_chunk_may_have() {
+        let app = Router::new().fallback(|| async {
+            let parts = futures_util::stream::iter(
+                (0..100).map(|_| Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![7u8; 1000]))),
+            );
+            axum::body::Body::from_stream(parts)
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let t = target(&format!("http://127.0.0.1:{}", addr.port()), None);
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("down");
+        let e = t
+            .download_named("web/2024-01-01/a.parquet", &dest, 5000)
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("more than the 5000"), "{e}");
+        assert!(std::fs::metadata(&dest).unwrap().len() <= 5000);
     }
 
     fn multistatus_of(entries: &[(&str, bool)]) -> String {
@@ -694,11 +722,12 @@ mod tests {
         t.put_for_test("web/2024-01-01/a.parquet", &file(tmp.path(), &[1u8; 100]))
             .await
             .unwrap();
+        let dest = tmp.path().join("down");
         let e = t
-            .get_named("web/2024-01-01/a.parquet", 10)
+            .download_named("web/2024-01-01/a.parquet", &dest, 10)
             .await
             .unwrap_err();
-        assert!(e.to_string().contains("larger than"), "{e}");
+        assert!(e.to_string().contains("more than the 10"), "{e}");
     }
 
     #[tokio::test]

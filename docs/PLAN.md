@@ -15,7 +15,7 @@ Everything below the line "Real-service tests" runs only after the build phases 
 - Both implement `put`, `list` and `get`, so encryption, markers, retries and `storage restore` work unchanged.
 - Verified by fake-server tests, a fresh-agent review, mutation checks and live runs against containers (see Phase 5).
 
-### Phase 2: download hardening
+### Phase 2: download hardening (done)
 - Stream downloads to the temporary file instead of holding the chunk in memory; replace the 1 GiB cap.
 - Paginate listings and scale the timeout with the object count.
 

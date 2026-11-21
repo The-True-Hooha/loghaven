@@ -46,14 +46,31 @@ impl DayRange {
     }
 }
 
-/// A chunk bigger than this is not restored. Chunks are capped by `rotate_size_mb`, so an object
-/// this big is not one of ours; the whole object is read into memory, so the bound is a real one.
-const MAX_CHUNK_BYTES: u64 = 1 << 30;
+/// The largest chunk restored as it is. Chunks are capped by `rotate_size_mb`, so an object this
+/// big is not one of ours; it is streamed to disk, so the bound is on disk space, not memory.
+const MAX_PLAIN_BYTES: u64 = 16 << 30;
+
+/// The largest encrypted chunk restored. An AES-GCM object is one message that is only
+/// authenticated once all of it is read, so it is decrypted in memory, and the bound is real.
+const MAX_SEALED_BYTES: u64 = 1 << 30;
 
 const PARQUET_MAGIC: &[u8; 4] = b"PAR1";
 
 fn looks_like_parquet(bytes: &[u8]) -> bool {
     bytes.len() >= 8 && bytes.starts_with(PARQUET_MAGIC) && bytes.ends_with(PARQUET_MAGIC)
+}
+
+fn file_looks_like_parquet(path: &Path) -> std::io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    if f.metadata()?.len() < 8 {
+        return Ok(false);
+    }
+    let (mut head, mut tail) = ([0u8; 4], [0u8; 4]);
+    f.read_exact(&mut head)?;
+    f.seek(SeekFrom::End(-4))?;
+    f.read_exact(&mut tail)?;
+    Ok(&head == PARQUET_MAGIC && &tail == PARQUET_MAGIC)
 }
 
 /// Copies one app's chunks from `target` into the data directory as plain chunks, decrypting
@@ -115,24 +132,6 @@ async fn fetch(
     keys: &[Encryptor],
     chunk: &Path,
 ) -> Result<Published> {
-    let bytes = target.get_named(object, MAX_CHUNK_BYTES).await?;
-    let plain = if sealed {
-        decrypt_with(keys, name, &bytes)?
-    } else {
-        bytes
-    };
-    if !looks_like_parquet(&plain) {
-        return Err(LogHavenError::Storage("not a Parquet file".into()));
-    }
-    publish(chunk, &plain)
-}
-
-/// Writes the chunk so the daemon never sees it half done or unmarked: the marker goes first (a
-/// chunk with no marker would be uploaded again, and deleted when `delete_after_upload` is on),
-/// the bytes go to a unique temporary file, and a hard link puts them in place only if nothing
-/// is there yet.
-fn publish(chunk: &Path, plain: &[u8]) -> Result<Published> {
-    use std::io::Write;
     let dir = chunk
         .parent()
         .ok_or_else(|| LogHavenError::Storage("chunk has no directory".into()))?;
@@ -145,30 +144,78 @@ fn publish(chunk: &Path, plain: &[u8]) -> Result<Published> {
             )));
         }
     }
+    let made_dir = !dir.exists();
+    let made_app_dir = !app_dir.exists();
     std::fs::create_dir_all(dir)?;
-    let marker = marker_path(chunk);
-    std::fs::write(&marker, b"")?;
     // `parquet.tmp` is the ending the writer's startup sweep removes
     let tmp = dir.join(format!(
         ".restore-{:016x}.parquet.tmp",
         rand::random::<u64>()
     ));
-    let written = (|| -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        f.write_all(plain)?;
-        f.sync_all()
-    })();
-    let linked = written.and_then(|()| std::fs::hard_link(&tmp, chunk));
+    let staged = stage(target, object, name, sealed, keys, &tmp).await;
+    let published = match staged {
+        Ok(()) => publish(&tmp, chunk),
+        Err(e) => Err(e),
+    };
     let _ = std::fs::remove_file(&tmp);
-    match linked {
+    if made_dir && !matches!(published, Ok(Published::New)) {
+        let _ = std::fs::remove_dir(dir);
+        if made_app_dir {
+            let _ = std::fs::remove_dir(app_dir);
+        }
+    }
+    published
+}
+
+/// Leaves the plain, checked chunk in `tmp`.
+async fn stage(
+    target: &Target,
+    object: &str,
+    name: &str,
+    sealed: bool,
+    keys: &[Encryptor],
+    tmp: &Path,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let cap = if sealed {
+        MAX_SEALED_BYTES
+    } else {
+        MAX_PLAIN_BYTES
+    };
+    target.download_named(object, tmp, cap).await?;
+    if sealed {
+        let plain = decrypt_with(keys, name, &tokio::fs::read(tmp).await?)?;
+        if !looks_like_parquet(&plain) {
+            return Err(LogHavenError::Storage("not a Parquet file".into()));
+        }
+        let mut f = tokio::fs::File::create(tmp).await?;
+        f.write_all(&plain).await?;
+        f.sync_all().await?;
+    } else if !file_looks_like_parquet(tmp)? {
+        return Err(LogHavenError::Storage("not a Parquet file".into()));
+    }
+    Ok(())
+}
+
+/// Puts the chunk in place so the daemon never sees it half done or unmarked: the marker goes
+/// first (a chunk with no marker would be uploaded again, and deleted when `delete_after_upload`
+/// is on), then a hard link makes the chunk appear only if nothing is there yet.
+fn publish(tmp: &Path, chunk: &Path) -> Result<Published> {
+    let marker = marker_path(chunk);
+    let marker_was_there = marker.exists();
+    std::fs::write(&marker, b"")?;
+    match std::fs::hard_link(tmp, chunk) {
         Ok(()) => Ok(Published::New),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(Published::AlreadyThere),
         Err(e) => {
-            let _ = std::fs::remove_file(&marker);
-            Err(LogHavenError::Io(e))
+            // a marker restore did not make belongs to whatever chunk it was written for
+            if !marker_was_there {
+                let _ = std::fs::remove_file(&marker);
+            }
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                Ok(Published::AlreadyThere)
+            } else {
+                Err(LogHavenError::Io(e))
+            }
         }
     }
 }
@@ -418,6 +465,101 @@ mod tests {
         assert_eq!(report.failed.len(), 1, "{report:?}");
         let left: Vec<_> = walk(data.path());
         assert!(left.is_empty(), "{left:?}");
+        assert!(!data.path().join("web/2024-01-01").exists());
+    }
+
+    #[tokio::test]
+    async fn a_big_chunk_is_streamed_to_disk_whole_and_leaves_no_temporary_file() {
+        let mem = Arc::new(object_store::memory::InMemory::new());
+        let body = parquet(&"x".repeat(5 << 20));
+        mem.put(&"web/2024-01-01/big.parquet".into(), body.clone().into())
+            .await
+            .unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let report = restore_app(
+            &memory_target(&mem, None),
+            data.path(),
+            &[],
+            "web",
+            DayRange::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report.restored,
+            ["web/2024-01-01/big.parquet"],
+            "{report:?}"
+        );
+        assert_eq!(
+            std::fs::read(data.path().join("web/2024-01-01/big.parquet")).unwrap(),
+            body
+        );
+        let names: Vec<_> = walk(data.path())
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(
+            names.iter().all(|n| !n.starts_with(".restore-")),
+            "{names:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_name_taken_after_the_check_leaves_no_marker_and_no_app_directory_on_failure() {
+        let mem = Arc::new(object_store::memory::InMemory::new());
+        mem.put(&"web/2024-01-01/a.parquet".into(), parquet("rows").into())
+            .await
+            .unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let day = data.path().join("web/2024-01-01");
+        std::fs::create_dir_all(&day).unwrap();
+        std::os::unix::fs::symlink("/nonexistent/x", day.join("a.parquet")).unwrap();
+        let report = restore_app(
+            &memory_target(&mem, None),
+            data.path(),
+            &[],
+            "web",
+            DayRange::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.present, 1, "{report:?}");
+        assert!(!day.join("a.parquet.synced").exists());
+
+        mem.put(
+            &"api/2024-01-01/b.parquet".into(),
+            b"<html>".to_vec().into(),
+        )
+        .await
+        .unwrap();
+        restore_app(
+            &memory_target(&mem, None),
+            data.path(),
+            &[],
+            "api",
+            DayRange::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!data.path().join("api").exists());
+    }
+
+    #[test]
+    fn a_file_is_checked_for_the_parquet_magic_at_both_ends() {
+        let d = tempfile::tempdir().unwrap();
+        for (body, ok) in [
+            (parquet("rows"), true),
+            (b"PAR1".to_vec(), false),
+            (b"PAR1rowsrows".to_vec(), false),
+            (b"rowsrowsPAR1".to_vec(), false),
+            (vec![], false),
+        ] {
+            let p = d.path().join("f");
+            std::fs::write(&p, &body).unwrap();
+            assert_eq!(file_looks_like_parquet(&p).unwrap(), ok, "{body:?}");
+        }
     }
 
     fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
