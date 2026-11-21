@@ -24,6 +24,8 @@ struct Mock {
     unordered: bool,
     /// Operation requests beyond this many answer HTTP 429.
     rate_limit_ops_after: std::cell::Cell<usize>,
+    /// Account listings beyond this many answer HTTP 429.
+    rate_limit_lists_after: std::cell::Cell<usize>,
     calls: RefCell<Vec<String>>,
 }
 
@@ -38,6 +40,7 @@ impl Mock {
             latest_ledger: u64::MAX,
             unordered: false,
             rate_limit_ops_after: std::cell::Cell::new(usize::MAX),
+            rate_limit_lists_after: std::cell::Cell::new(usize::MAX),
             calls: RefCell::new(vec![]),
         }
     }
@@ -105,6 +108,11 @@ impl Get for Mock {
                 .map(|i| json!({"type": if i == 0 { "payment" } else { "manage_data" }, "n": n}))
                 .collect();
             return Ok(Some(json!({"_embedded": {"records": ops}})));
+        }
+        if self.count("/accounts/") > self.rate_limit_lists_after.get() {
+            return Err(LogHavenError::RateLimited(
+                "GET /accounts failed: HTTP 429 Too Many Requests".into(),
+            ));
         }
         let account = path
             .strip_prefix("/accounts/")
@@ -269,6 +277,34 @@ fn a_rate_limited_operation_read_keeps_what_was_read_and_resumes_after_it() {
         }),
     ));
     assert!(matches!(e, Err(LogHavenError::RateLimited(_))));
+}
+
+#[test]
+fn a_rate_limited_listing_keeps_the_accounts_read_before_it_and_leaves_the_rest_for_later() {
+    let rpc = Mock::new().with(A, 1..=2).with(B, 3..=4);
+    rpc.rate_limit_lists_after.set(2);
+    let cur = Cursor {
+        binding: "b".into(),
+        last: BTreeMap::from([(A.to_string(), token(0)), (B.to_string(), token(0))]),
+    };
+    let cfg = StellarConfig {
+        accounts: vec![A.into(), B.into()],
+        ..cfg()
+    };
+    let b = block_on(poll(&rpc, &cfg, Some(&cur))).unwrap();
+    assert_eq!(hashes(&b), [hash(1), hash(2)]);
+    assert_eq!(b.last[A], token(2));
+    assert!(
+        !b.last.contains_key(B),
+        "the account that was not read keeps its saved place"
+    );
+
+    rpc.rate_limit_lists_after.set(0);
+    let e = block_on(poll(&rpc, &cfg, Some(&cur)));
+    assert!(
+        matches!(e, Err(LogHavenError::RateLimited(_))),
+        "nothing read at all is still an error"
+    );
 }
 
 #[test]

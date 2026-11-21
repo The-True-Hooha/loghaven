@@ -213,13 +213,18 @@ pub async fn poll(get: &impl Get, cfg: &StellarConfig, saved: Option<&Cursor>) -
         })?;
     // one more than `max`, to know whether the account has a backlog beyond this poll
     let mut listed = vec![];
+    // a busy node keeps what was read for the accounts before it; the rest wait for the next poll
+    let mut listing_throttled = None;
     for account in accounts {
         let until = saved.last.get(account).copied();
-        listed.push((
-            account,
-            until,
-            page_after(get, account, until, max + 1, ceiling).await?,
-        ));
+        match page_after(get, account, until, max + 1, ceiling).await {
+            Ok(page) => listed.push((account, until, page)),
+            Err(e @ LogHavenError::RateLimited(_)) => {
+                listing_throttled = Some(e);
+                break;
+            }
+            Err(e) => return Err(e),
+        }
     }
     let slices: Vec<&[Tx]> = listed.iter().map(|(_, _, p)| p.as_slice()).collect();
     let counts = take_counts(&slices, max, |t| t.ledger);
@@ -259,7 +264,7 @@ pub async fn poll(get: &impl Get, cfg: &StellarConfig, saved: Option<&Cursor>) -
             last.insert((*account).clone(), newest);
         }
     }
-    if let Some(e) = throttled
+    if let Some(e) = throttled.or(listing_throttled)
         && records.is_empty()
     {
         return Err(e);
