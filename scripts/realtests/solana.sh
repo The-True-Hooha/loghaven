@@ -15,7 +15,7 @@ AREA="Solana (test validator)"
 . "$ROOT/scripts/realtests/lib.sh"
 
 container lh-solana --platform linux/amd64 -p 18899:8899 --entrypoint sh lh-solana-test:2.3.13 -c \
-  'solana-keygen new --no-bip39-passphrase --silent -o /root/.config/solana/id.json && exec solana-test-validator --reset --quiet --ledger /ledger --rpc-port 8899 --bind-address $(hostname -i | awk "{print \$1}")'
+  'solana-keygen new --no-bip39-passphrase --silent -o /root/.config/solana/id.json && exec solana-test-validator --reset --quiet --ledger /ledger --rpc-port 8899 --rpc-bind-address 0.0.0.0'
 WORK=$(mktemp -d /tmp/lhsolana.XXXXXX)
 WATCH_PID=
 stop_watch() { [ -n "$WATCH_PID" ] && kill "$WATCH_PID" 2>/dev/null; WATCH_PID=; }
@@ -33,6 +33,7 @@ WATCHED=$(keys pubkey /watched.json)
 # native x86 Linux host both work.
 send() { curl -s -m 30 -X POST -H 'content-type: application/json' \
   --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"requestAirdrop\",\"params\":[\"$WATCHED\",1000000]}" $RPC | grep -q '"result"'; }
+podman_ exec lh-solana sh -c 'solana -u http://127.0.0.1:8899 slot' >/dev/null 2>&1
 check "an airdrop to the watched address lands" 'send && wait_for 60 "[ \"\$(sol balance \"$WATCHED\" | cut -d. -f1 | tr -dc 0-9)\" != \"\" ] && [ \"\$(sol balance \"$WATCHED\")\" != \"0 SOL\" ]"'
 
 new_home "$WORK/home"
@@ -77,4 +78,5 @@ check "every transfer of the soak is recorded exactly once" 'wait_for 60 "[ \"\$
 check "the watcher is still running" 'kill -0 "$WATCH_PID" 2>/dev/null'
 check "the watcher log has no error" '! grep -qi "error" "$WORK/watch.log" "$WORK/watch2.log"'
 
+[ "$FAILED" = 0 ] || { echo "-- validator log"; podman_ exec lh-solana sh -c 'tail -n 30 /ledger/validator.log' 2>&1 | cut -c1-200; }
 summary
