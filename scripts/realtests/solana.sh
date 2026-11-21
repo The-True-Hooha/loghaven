@@ -44,7 +44,7 @@ send() { curl -s -m 30 -X POST -H 'content-type: application/json' \
 # what the chain holds for the address: the truth the watcher is compared with. The first
 # airdrop happens before the watcher starts, so the watcher does not record it.
 chain_count() { curl -s -m 30 -X POST -H 'content-type: application/json' \
-  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getSignaturesForAddress\",\"params\":[\"$WATCHED\",{\"limit\":1000,\"commitment\":\"finalized\"}]}" $RPC \
+  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getSignaturesForAddress\",\"params\":[\"$WATCHED\",{\"limit\":1000,\"commitment\":\"confirmed\"}]}" $RPC \
   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]) - 1)'; }
 matches_chain() { # at least $1 transactions, and the watcher has exactly the chain's
   local want; want=$(chain_count); [ "$want" -ge "$1" ] && [ "$(count solana)" = "$want" ]
