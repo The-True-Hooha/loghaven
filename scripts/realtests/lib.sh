@@ -33,8 +33,10 @@ wait_http() { # url, seconds
 new_home() { # dir
   export HOME=$1
   mkdir -p "$HOME"
-  CONFIG=$("$BIN" init 2>&1 | sed -n 's/.*Edit config: //p')
-  [ -f "$CONFIG" ] || { echo "no config at '$CONFIG'"; exit 1; }
+  unset XDG_CONFIG_HOME XDG_DATA_HOME
+  local init; init=$("$BIN" init 2>&1)
+  CONFIG=$(printf '%s\n' "$init" | sed -n 's/.*Edit config: //p')
+  [ -f "$CONFIG" ] || { echo "no config at '$CONFIG'; init said:"; printf '%s\n' "$init"; env | grep -E "^(HOME|XDG)" ; exit 1; }
   "$BIN" auth keygen >/dev/null
   sed -i.bak 's/flush_interval_secs = 30/flush_interval_secs = 1/' "$CONFIG"
   DATA=$(sed -n 's/^path = "\(.*\)"/\1/p' "$CONFIG" | head -1)
