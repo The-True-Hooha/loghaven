@@ -9,6 +9,8 @@ pub mod record;
 pub mod restore;
 pub(crate) mod sftp;
 #[cfg(test)]
+mod sftp_server;
+#[cfg(test)]
 mod storage_tests;
 mod stores;
 pub(crate) mod webdav;

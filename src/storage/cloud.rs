@@ -47,6 +47,7 @@ pub(crate) struct Sink {
     file: tokio::fs::File,
     written: u64,
     max_bytes: u64,
+    started: std::time::Instant,
 }
 
 impl Sink {
@@ -61,6 +62,7 @@ impl Sink {
             file,
             written: 0,
             max_bytes,
+            started: std::time::Instant::now(),
         })
     }
 
@@ -77,6 +79,13 @@ impl Sink {
     pub(crate) async fn push(&mut self, part: &[u8]) -> Result<()> {
         use tokio::io::AsyncWriteExt;
         self.refuse_if_larger(self.written.saturating_add(part.len() as u64))?;
+        // a trickle that never stalls long enough for the stall timeout would otherwise hold the
+        // transfer for as long as the size cap allows
+        if self.started.elapsed() > upload_budget(self.written) {
+            return Err(LogHavenError::Storage(
+                "download from cloud is slower than the least it is allowed".into(),
+            ));
+        }
         self.file
             .write_all(part)
             .await
@@ -615,6 +624,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.to_string().contains("more than the 2999"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_sink_gives_up_on_a_trickle_that_never_stalls() {
+        let d = tempfile::tempdir().unwrap();
+        let mut sink = Sink::create(&d.path().join("s"), 1 << 30).await.unwrap();
+        sink.push(&[0; 1]).await.unwrap();
+        sink.started -= upload_budget(1) + std::time::Duration::from_secs(1);
+        let e = sink.push(&[0; 1]).await.unwrap_err();
+        assert!(e.to_string().contains("slower"), "{e}");
     }
 
     #[tokio::test]
