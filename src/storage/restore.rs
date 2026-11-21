@@ -54,6 +54,38 @@ const MAX_PLAIN_BYTES: u64 = 16 << 30;
 /// authenticated once all of it is read, so it is decrypted in memory, and the bound is real.
 const MAX_SEALED_BYTES: u64 = 1 << 30;
 
+const RESTORE_PREFIX: &str = ".restore-";
+const RESTORE_SUFFIX: &str = ".part";
+/// A temporary file idle this long is the leftover of a restore that died; one being filled is
+/// written to at least every `STALL_TIMEOUT`.
+const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Removes leftovers of earlier restores that were killed in the middle.
+fn sweep_stale(data_path: &Path, app: &str) {
+    for day in std::fs::read_dir(data_path.join(app))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        for f in std::fs::read_dir(day.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = f.file_name().to_string_lossy().into_owned();
+            let idle = f
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > STALE_AFTER);
+            if name.starts_with(RESTORE_PREFIX) && name.ends_with(RESTORE_SUFFIX) && idle {
+                let _ = std::fs::remove_file(f.path());
+            }
+        }
+    }
+}
+
 const PARQUET_MAGIC: &[u8; 4] = b"PAR1";
 
 fn looks_like_parquet(bytes: &[u8]) -> bool {
@@ -86,6 +118,7 @@ pub async fn restore_app(
     days: DayRange,
 ) -> Result<RestoreReport> {
     crate::storage::validate_app_name(app)?;
+    sweep_stale(data_path, app);
     let mut report = RestoreReport::default();
     let mut listed = target.list_app(&format!("{app}/")).await?;
     listed.sort();
@@ -147,9 +180,9 @@ async fn fetch(
     let made_dir = !dir.exists();
     let made_app_dir = !app_dir.exists();
     std::fs::create_dir_all(dir)?;
-    // `parquet.tmp` is the ending the writer's startup sweep removes
+    // not `.parquet.tmp`: the daemon's startup sweep deletes those, even one being filled now
     let tmp = dir.join(format!(
-        ".restore-{:016x}.parquet.tmp",
+        "{RESTORE_PREFIX}{:016x}{RESTORE_SUFFIX}",
         rand::random::<u64>()
     ));
     let staged = stage(target, object, name, sealed, keys, &tmp).await;
@@ -500,7 +533,7 @@ mod tests {
             .collect();
         assert_eq!(names.len(), 2, "{names:?}");
         assert!(
-            names.iter().all(|n| !n.starts_with(".restore-")),
+            names.iter().all(|n| !n.starts_with(RESTORE_PREFIX)),
             "{names:?}"
         );
     }
@@ -544,6 +577,45 @@ mod tests {
         .await
         .unwrap();
         assert!(!data.path().join("api").exists());
+    }
+
+    #[tokio::test]
+    async fn only_idle_leftovers_of_an_earlier_restore_are_swept() {
+        let mem = Arc::new(object_store::memory::InMemory::new());
+        let data = tempfile::tempdir().unwrap();
+        let day = data.path().join("web/2024-01-01");
+        std::fs::create_dir_all(&day).unwrap();
+        for n in [
+            ".restore-1.part",
+            ".restore-2.part",
+            "notes.part",
+            "x.parquet",
+        ] {
+            std::fs::write(day.join(n), b"x").unwrap();
+        }
+        let old = std::time::SystemTime::now() - 2 * STALE_AFTER;
+        for n in [".restore-1.part", "notes.part"] {
+            std::fs::File::options()
+                .write(true)
+                .open(day.join(n))
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        let _ = restore_app(
+            &memory_target(&mem, None),
+            data.path(),
+            &[],
+            "web",
+            DayRange::default(),
+        )
+        .await;
+        let mut left: Vec<_> = walk(&day)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, [".restore-2.part", "notes.part", "x.parquet"]);
     }
 
     #[test]

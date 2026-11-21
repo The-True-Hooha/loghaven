@@ -546,6 +546,28 @@ mod tests {
         assert!(std::fs::metadata(&dest).unwrap().len() <= 5000);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_body_that_stops_midway_is_given_up_on() {
+        use futures_util::StreamExt;
+        let app = Router::new().fallback(|| async {
+            let parts = futures_util::stream::iter([Ok::<_, std::io::Error>(
+                axum::body::Bytes::from_static(b"PAR1"),
+            )])
+            .chain(futures_util::stream::pending());
+            axum::body::Body::from_stream(parts)
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let t = target(&format!("http://127.0.0.1:{}", addr.port()), None);
+        let tmp = tempfile::tempdir().unwrap();
+        let e = t
+            .download_named("web/2024-01-01/a.parquet", &tmp.path().join("d"), 1 << 20)
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("timed out"), "{e}");
+    }
+
     fn multistatus_of(entries: &[(&str, bool)]) -> String {
         let mut x = String::from(r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">"#);
         for (href, col) in entries {
