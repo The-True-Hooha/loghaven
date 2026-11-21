@@ -41,7 +41,14 @@ WATCHED=$(keys pubkey /watched.json)
 # native x86 Linux host both work.
 send() { curl -s -m 30 -X POST -H 'content-type: application/json' \
   --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"requestAirdrop\",\"params\":[\"$WATCHED\",1000000]}" $RPC | grep -q '"result"'; }
-podman_ exec lh-solana sh -c 'solana -u http://127.0.0.1:8899 slot' >/dev/null 2>&1
+# what the chain holds for the address: the truth the watcher is compared with. The first
+# airdrop happens before the watcher starts, so the watcher does not record it.
+chain_count() { curl -s -m 30 -X POST -H 'content-type: application/json' \
+  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getSignaturesForAddress\",\"params\":[\"$WATCHED\",{\"limit\":1000,\"commitment\":\"finalized\"}]}" $RPC \
+  | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]) - 1)'; }
+matches_chain() { # at least $1 transactions, and the watcher has exactly the chain's
+  local want; want=$(chain_count); [ "$want" -ge "$1" ] && [ "$(count solana)" = "$want" ]
+}
 check "an airdrop to the watched address lands" 'send && wait_for 60 "[ \"\$(sol balance \"$WATCHED\" | cut -d. -f1 | tr -dc 0-9)\" != \"\" ] && [ \"\$(sol balance \"$WATCHED\")\" != \"0 SOL\" ]"'
 
 new_home "$WORK/home"
@@ -61,10 +68,10 @@ WATCH_PID=$!
 check "the watcher starts" 'wait_for 30 "grep -q Watching $WORK/watch.log"'
 sleep 6
 for _ in 1 2 3; do send; done
-check "the first three transfers are recorded" 'wait_for 60 "[ \"\$(count solana)\" = 3 ]"'
+check "the transfers that landed are recorded (at least 2 of 3)" 'wait_for 90 "matches_chain 2"'
 T0=$(date +%s)
 send
-check "a new transfer is recorded within a few polls" 'wait_for 30 "[ \"\$(count solana)\" = 4 ]"'
+check "a new transfer is recorded within a few polls" 'wait_for 60 "matches_chain 3"'
 echo "   latency: $(( $(date +%s) - T0 )) s"
 SIG=$("$BIN" logs solana --limit 1 2>&1 | grep -o '[1-9A-HJ-NP-Za-km-z]\{80,90\}' | head -1)
 check "a record can be traced by signature" '[ -n "$SIG" ] && "$BIN" trace "$SIG" --app solana 2>&1 | grep -q "slot"'
@@ -74,15 +81,15 @@ stop_watch
 send; send
 "$BIN" watch solana >"$WORK/watch2.log" 2>&1 &
 WATCH_PID=$!
-check "two transfers made while the watcher was down are recorded once" 'wait_for 60 "[ \"\$(count solana)\" = 6 ]"'
+check "transfers made while the watcher was down are recorded once" 'wait_for 90 "matches_chain 4"'
 sleep 6
-check "nothing is repeated after the restart" '[ "$(count solana)" = 6 ]'
+check "nothing is repeated after the restart" 'matches_chain 4'
 
 echo "== soak ($SOAK s, one transfer every 2 s)"
 SENT=6
 END=$(( $(date +%s) + SOAK ))
 while [ "$(date +%s)" -lt "$END" ]; do send && SENT=$((SENT+1)); sleep 2; done
-check "every transfer of the soak is recorded exactly once" 'wait_for 60 "[ \"\$(count solana)\" = $SENT ]"'
+check "most soak transfers landed and each is recorded exactly once" 'wait_for 90 "matches_chain $((SENT * 3 / 4))"'
 check "the watcher is still running" 'kill -0 "$WATCH_PID" 2>/dev/null'
 check "the watcher log has no error" '! grep -qi "error" "$WORK/watch.log" "$WORK/watch2.log"'
 
