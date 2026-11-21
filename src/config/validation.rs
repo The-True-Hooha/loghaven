@@ -233,6 +233,23 @@ fn validate_targets(config: &Config) -> Result<()> {
                 password_env,
             } => {
                 check_endpoint(&format!("{at}.url"), url)?;
+                let parsed = reqwest::Url::parse(url)
+                    .map_err(|_| LogHavenError::Config(format!("{at}.url is not a valid URL")))?;
+                if !parsed.username().is_empty() || parsed.password().is_some() {
+                    return bad(format!(
+                        "{at}: url must not carry a user name or password; use username and password"
+                    ));
+                }
+                let host = parsed.host_str().unwrap_or("").trim_matches(['[', ']']);
+                let loopback = host == "localhost"
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback());
+                if parsed.scheme() == "http" && username.is_some() && !loopback {
+                    return bad(format!(
+                        "{at}: a login must not be sent over http:// except to this machine; use https://"
+                    ));
+                }
                 if username.as_deref().is_some_and(|u| u.trim().is_empty()) {
                     return bad(format!("{at}: username is empty"));
                 }
@@ -252,7 +269,7 @@ fn validate_targets(config: &Config) -> Result<()> {
                 password_env,
                 path,
             } => {
-                if host.trim().is_empty() || host.contains(['/', ' ']) {
+                if host.trim().is_empty() || host.contains(['/', ' ', '@']) {
                     return bad(format!("{at}: host must be a host name or address"));
                 }
                 if *port == 0 {
@@ -262,7 +279,7 @@ fn validate_targets(config: &Config) -> Result<()> {
                     return bad(format!("{at}: username is required"));
                 }
                 if !host_key.strip_prefix("SHA256:").is_some_and(|h| {
-                    h.len() >= 43
+                    h.len() == 43
                         && h.bytes()
                             .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
                 }) {

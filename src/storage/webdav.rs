@@ -14,6 +14,18 @@ pub(crate) struct WebDavStore {
     made: Mutex<HashSet<String>>,
 }
 
+const MAX_LISTING_BYTES: usize = 16 << 20;
+const MAX_DEPTH: usize = 32;
+const MAX_LISTED: usize = 200_000;
+
+/// The path of a URL as the server means it: percent-decoded, no trailing slash.
+fn decoded_path(url: &Url) -> String {
+    percent_encoding::percent_decode_str(url.path())
+        .decode_utf8_lossy()
+        .trim_end_matches('/')
+        .to_string()
+}
+
 fn fail(what: &str, detail: impl std::fmt::Display) -> LogHavenError {
     LogHavenError::Storage(format!("WebDAV {what} failed: {detail}"))
 }
@@ -38,7 +50,9 @@ impl WebDavStore {
         }
         base.set_query(None);
         base.set_fragment(None);
+        // a redirect would resend the login (and cannot replay a streamed upload)
         let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| LogHavenError::Config(format!("cannot set up WebDAV client: {e}")))?;
@@ -112,18 +126,22 @@ impl WebDavStore {
             .await
             .map_err(|e| transport("PUT", e))?;
         if resp.status().is_success() {
-            Ok(())
-        } else {
-            Err(status("PUT", resp.status()))
+            return Ok(());
         }
+        if matches!(resp.status(), StatusCode::NOT_FOUND | StatusCode::CONFLICT) {
+            // a collection made earlier may have been removed since
+            self.made.lock().unwrap().clear();
+        }
+        Err(status("PUT", resp.status()))
     }
 
     /// Entries one level below a collection: key (relative to the base) and whether it is a
-    /// collection. A collection that does not exist has none.
+    /// collection. A collection that does not exist has none. Anything the server lists that is
+    /// not below the base, or is the collection itself, is ignored.
     async fn children(&self, collection: &str) -> Result<Vec<(String, bool)>> {
         let method = Method::from_bytes(b"PROPFIND").expect("valid method");
         let url = self.url(collection, true)?;
-        let resp = self
+        let mut resp = self
             .request(method, url.clone())
             .header("Depth", "1")
             .header(reqwest::header::CONTENT_TYPE, "application/xml")
@@ -139,20 +157,36 @@ impl WebDavStore {
         if !resp.status().is_success() {
             return Err(status("PROPFIND", resp.status()));
         }
-        let text = resp.text().await.map_err(|e| transport("PROPFIND", e))?;
-        let base_len = self.base.path().trim_end_matches('/').len();
+        let mut raw = Vec::new();
+        while let Some(part) = resp.chunk().await.map_err(|e| transport("PROPFIND", e))? {
+            if raw.len() + part.len() > MAX_LISTING_BYTES {
+                return Err(fail("PROPFIND", "the answer is too large"));
+            }
+            raw.extend_from_slice(&part);
+        }
+        let text = String::from_utf8_lossy(&raw);
+        let base_path = decoded_path(&self.base);
+        let me = decoded_path(&url);
         let mut out = Vec::new();
         for (href, is_collection) in parse_multistatus(&text)? {
             let Ok(full) = url.join(&href) else { continue };
-            if full.host_str() != url.host_str() || full.path() == url.path() {
+            if full.scheme() != url.scheme()
+                || full.host_str() != url.host_str()
+                || full.port_or_known_default() != url.port_or_known_default()
+            {
                 continue;
             }
-            let path = percent_encoding::percent_decode_str(full.path()).decode_utf8_lossy();
-            let Some(rel) = path.get(base_len..) else {
+            let path = decoded_path(&full);
+            if path == me {
+                continue;
+            }
+            let Some(rel) = path
+                .strip_prefix(&base_path)
+                .and_then(|r| r.strip_prefix('/'))
+            else {
                 continue;
             };
-            let rel = rel.trim_matches('/');
-            if !rel.is_empty() {
+            if !rel.is_empty() && !rel.split('/').any(|s| s == "..") {
                 out.push((rel.to_string(), is_collection));
             }
         }
@@ -161,17 +195,25 @@ impl WebDavStore {
 
     async fn walk(&self, collection: &str) -> Result<Vec<String>> {
         let mut files = Vec::new();
-        let mut todo = vec![collection.trim_matches('/').to_string()];
-        while let Some(dir) = todo.pop() {
+        let mut seen = HashSet::new();
+        let mut todo = vec![(collection.trim_matches('/').to_string(), 0usize)];
+        while let Some((dir, depth)) = todo.pop() {
+            if !seen.insert(dir.clone()) {
+                continue;
+            }
+            if depth > MAX_DEPTH || files.len() > MAX_LISTED {
+                return Err(fail("PROPFIND", "the listing is too deep or too large"));
+            }
             for (key, is_collection) in self.children(&dir).await? {
                 if is_collection {
-                    todo.push(key);
+                    todo.push((key, depth + 1));
                 } else {
                     files.push(key);
                 }
             }
         }
         files.sort();
+        files.dedup();
         Ok(files)
     }
 
@@ -205,43 +247,47 @@ impl WebDavStore {
 }
 
 /// `(href, is_collection)` of every `response` in a PROPFIND answer; namespace prefixes vary
-/// between servers, so only local names are compared.
+/// between servers, so only local names are compared. Entities (`&amp;`) inside an href are
+/// resolved: the reader delivers them as events of their own.
 fn parse_multistatus(xml: &str) -> Result<Vec<(String, bool)>> {
-    use quick_xml::{Reader, events::Event};
+    use quick_xml::{Reader, escape::resolve_predefined_entity, events::Event};
+    let bad = |e: &dyn std::fmt::Display| fail("PROPFIND", format!("bad XML: {e}"));
     let mut reader = Reader::from_str(xml);
     let mut out = Vec::new();
-    let mut href = None;
+    let mut href = String::new();
+    let mut seen_href = false;
     let mut collection = false;
     let mut in_href = false;
     loop {
-        match reader
-            .read_event()
-            .map_err(|e| fail("PROPFIND", format!("bad XML: {e}")))?
-        {
+        match reader.read_event().map_err(|e| bad(&e))? {
             Event::Start(e) => match e.local_name().as_ref() {
                 b"response" => {
-                    href = None;
+                    href.clear();
+                    seen_href = false;
                     collection = false;
                 }
-                b"href" => in_href = true,
+                b"href" => {
+                    in_href = true;
+                    seen_href = true;
+                    href.clear();
+                }
                 b"collection" => collection = true,
                 _ => {}
             },
             Event::Empty(e) if e.local_name().as_ref() == b"collection" => collection = true,
-            Event::Text(t) if in_href => {
-                href = Some(
-                    t.decode()
-                        .map_err(|e| fail("PROPFIND", format!("bad XML: {e}")))?
-                        .into_owned(),
-                );
+            Event::Text(t) if in_href => href.push_str(&t.decode().map_err(|e| bad(&e))?),
+            Event::GeneralRef(r) if in_href => {
+                if let Some(c) = r.resolve_char_ref().map_err(|e| bad(&e))? {
+                    href.push(c);
+                } else if let Some(text) =
+                    resolve_predefined_entity(&r.decode().map_err(|e| bad(&e))?)
+                {
+                    href.push_str(text);
+                }
             }
             Event::End(e) => match e.local_name().as_ref() {
                 b"href" => in_href = false,
-                b"response" => {
-                    if let Some(h) = href.take() {
-                        out.push((h, collection));
-                    }
-                }
+                b"response" if seen_href => out.push((std::mem::take(&mut href), collection)),
                 _ => {}
             },
             Event::Eof => break,
@@ -288,7 +334,7 @@ mod tests {
         Router,
         body::Bytes,
         extract::{Request, State},
-        http::{Method as M, StatusCode as S},
+        http::StatusCode as S,
         response::{IntoResponse, Response},
     };
     use std::collections::{BTreeMap, BTreeSet};
@@ -396,7 +442,6 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let _ = M::GET;
         (format!("http://{addr}/dav"), st)
     }
 
@@ -452,6 +497,175 @@ mod tests {
                 .await
                 .unwrap(),
             b"chunk bytes"
+        );
+    }
+
+    /// A server that answers every request the same way.
+    async fn canned(status: S, body: String, location: Option<&'static str>) -> String {
+        let app = Router::new().fallback(move || {
+            let body = body.clone();
+            async move {
+                let mut r = (status, body).into_response();
+                if let Some(l) = location {
+                    r.headers_mut().insert("location", l.parse().unwrap());
+                }
+                r
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("127.0.0.1:{}", addr.port())
+    }
+
+    fn multistatus_of(entries: &[(&str, bool)]) -> String {
+        let mut x = String::from(r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">"#);
+        for (href, col) in entries {
+            x.push_str(&format!(
+                "<d:response><d:href>{href}</d:href><d:propstat><d:prop><d:resourcetype>{}</d:resourcetype></d:prop></d:propstat></d:response>",
+                if *col { "<d:collection/>" } else { "" }
+            ));
+        }
+        x.push_str("</d:multistatus>");
+        x
+    }
+
+    async fn list_canned(base_path: &str, entries: &[(&str, bool)]) -> Result<Vec<String>> {
+        let addr = canned(S::MULTI_STATUS, multistatus_of(entries), None).await;
+        let t = target(&format!("http://{addr}{base_path}"), None);
+        t.list_app("web/").await
+    }
+
+    #[tokio::test]
+    async fn names_with_xml_entities_are_listed_whole() {
+        let got = list_canned(
+            "/dav",
+            &[
+                ("/dav/web/", true),
+                ("/dav/web/a&amp;b.parquet", false),
+                ("/dav/web/it&apos;s%20x.parquet", false),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, ["web/a&b.parquet", "web/it's x.parquet"]);
+    }
+
+    #[tokio::test]
+    async fn a_base_url_with_encoded_characters_still_gives_the_right_keys() {
+        let got = list_canned(
+            "/my%20dir/me%40x",
+            &[
+                ("/my%20dir/me%40x/web/", true),
+                ("/my%20dir/me%40x/web/f.parquet", false),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, ["web/f.parquet"]);
+    }
+
+    #[tokio::test]
+    async fn the_collection_itself_is_not_taken_for_a_child_with_or_without_the_slash() {
+        let got = list_canned("/dav", &[("/dav/web", true), ("/dav/web/f.parquet", false)])
+            .await
+            .unwrap();
+        assert_eq!(got, ["web/f.parquet"]);
+    }
+
+    #[tokio::test]
+    async fn entries_outside_the_base_or_on_another_host_are_ignored() {
+        let got = list_canned(
+            "/dav",
+            &[
+                ("/dav/web/", true),
+                ("/etc/passwd", false),
+                ("../../etc/x.parquet", false),
+                ("/dav/../etc/y.parquet", false),
+                ("http://evil.example/dav/web/z.parquet", false),
+                ("/dav/web/ok.parquet", false),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, ["web/ok.parquet"]);
+    }
+
+    #[tokio::test]
+    async fn a_server_that_lists_collections_in_a_cycle_does_not_loop_forever() {
+        // every PROPFIND answers with the same two collections, so web lists sub and sub lists web
+        let got = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            list_canned(
+                "/dav",
+                &[
+                    ("/dav/web/", true),
+                    ("/dav/web/sub/", true),
+                    ("/dav/web/f.parquet", false),
+                ],
+            ),
+        )
+        .await
+        .expect("the walk ended")
+        .unwrap();
+        assert!(got.iter().all(|k| k.ends_with("f.parquet")), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn an_endless_listing_is_cut_off() {
+        let addr = canned(S::MULTI_STATUS, " ".repeat(MAX_LISTING_BYTES + 1), None).await;
+        let e = target(&format!("http://{addr}/dav"), None)
+            .list_app("web/")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("too large"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_an_error_and_is_not_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addr = canned(
+            S::TEMPORARY_REDIRECT,
+            String::new(),
+            Some("http://127.0.0.1:1/x"),
+        )
+        .await;
+        let e = target(&format!("http://{addr}/dav"), None)
+            .put_for_test("web/2024-01-01/a.parquet", &file(tmp.path(), b"x"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("307"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_collection_removed_after_it_was_made_is_made_again_on_the_next_try() {
+        let (url, st) = dav_server().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = file(tmp.path(), b"x");
+        let t = target(&url, None);
+        t.put_for_test("web/2024-01-01/a.parquet", &src)
+            .await
+            .unwrap();
+        {
+            let mut d = st.lock().unwrap();
+            d.dirs.clear();
+            d.files.clear();
+        }
+        assert!(
+            t.put_for_test("web/2024-01-01/b.parquet", &src)
+                .await
+                .is_err()
+        );
+        t.put_for_test("web/2024-01-01/b.parquet", &src)
+            .await
+            .unwrap();
+        assert!(
+            st.lock()
+                .unwrap()
+                .files
+                .contains_key("web/2024-01-01/b.parquet")
         );
     }
 

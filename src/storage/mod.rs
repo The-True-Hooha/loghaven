@@ -939,6 +939,11 @@ credentials_file = "/nonexistent/sa.json"
         let ok = "type = \"webdav\"\nurl = \"https://dav.example.com/logs\"\nusername = \"u\"\npassword_env = \"P\"\n";
         assert!(one_target(ok).is_ok());
         assert!(one_target("type = \"webdav\"\nurl = \"https://dav.example.com\"\n").is_ok());
+        let local = "type = \"webdav\"\nurl = \"http://localhost:8081/logs\"\nusername = \"u\"\npassword = \"p\"\n";
+        assert!(
+            one_target(local).is_ok(),
+            "a login to this machine may go over http"
+        );
         for (bad, expect) in [
             (
                 "type = \"webdav\"\nurl = \"ftp://x\"\n",
@@ -959,6 +964,14 @@ credentials_file = "/nonexistent/sa.json"
             (
                 "type = \"webdav\"\nurl = \"https://h\"\nusernme = \"u\"\n",
                 "usernme",
+            ),
+            (
+                "type = \"webdav\"\nurl = \"http://dav.example.com\"\nusername = \"u\"\npassword = \"p\"\n",
+                "must not be sent over http",
+            ),
+            (
+                "type = \"webdav\"\nurl = \"https://me:pw@dav.example.com\"\n",
+                "must not carry a user name",
             ),
         ] {
             let e = one_target(bad).unwrap_err().to_string();
@@ -993,10 +1006,12 @@ credentials_file = "/nonexistent/sa.json"
                 .to_string();
             assert!(e.contains(expect), "{extra:?}: {e}");
         }
+        let long = format!("host_key = \"{FP}A\"\n");
         for key in [
             "",
             "host_key = \"MD5:aa\"\n",
             "host_key = \"SHA256:short\"\n",
+            long.as_str(),
         ] {
             let body =
                 format!("type = \"sftp\"\nhost = \"h\"\nusername = \"u\"\npassword = \"p\"\n{key}");
