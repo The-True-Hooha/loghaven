@@ -437,7 +437,29 @@ name = "gcs"
 type = "gcs"                # Google Cloud Storage, its own API
 bucket = "my-logs"
 credentials_file = "/etc/loghaven/service-account.json"   # optional
+
+[[storage.targets]]
+name = "nextcloud"
+type = "webdav"             # Nextcloud, ownCloud, Apache mod_dav, rclone serve webdav, ...
+url = "https://cloud.example.com/remote.php/dav/files/me/logs"
+username = "me"
+password_env = "LOGHAVEN_DAV_PASSWORD"
+
+[[storage.targets]]
+name = "nas"
+type = "sftp"               # a directory on an SSH server
+host = "nas.example.com"
+# port = 22
+username = "loghaven"
+host_key = "SHA256:J97WPuw9rEUpEiIpD76rPocvDq1EGWZKBPBVsiJuadI"   # ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+key_file = "/etc/loghaven/id_ed25519"   # or password / password_env, one of the two
+# key_passphrase_env = "LOGHAVEN_SSH_PASSPHRASE"
+# path = "backups/logs"     # below the login directory (or absolute); the login directory when unset
 ```
+
+**WebDAV.** `url` is the collection the logs go under. It may carry a path but not a user name or password: use `username` and `password`. A login may go over `http://` only to this machine (`localhost` or a loopback address); any other server needs `https://`. Redirects are not followed, because one would resend the login, so point `url` at the final address; a redirect shows up as an error naming its status. The collections along an object's key are created as needed, and a collection that was removed after it was made is made again on the next try. Uploads are streamed, so a big chunk does not sit in memory. A server that answers `MKCOL` with 405 for a collection that exists, as Apache does, is handled. A listing ignores anything the server names that is not below `url`, and stops with an error beyond 32 levels, 200 000 files or a 16 MiB answer.
+
+**SFTP.** `host_key` is required and is compared with the key the server presents on every connection, before any login is sent: a different key stops the upload with an error that names both fingerprints, so a changed or impersonated server is never trusted silently. A server that presents a certificate instead of a plain key is refused. Get the fingerprint from the server (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`) or from `ssh-keyscan host | ssh-keygen -lf -`. Log in with a private key (`key_file`, with an optional passphrase from `key_passphrase_env`) or a password, not both. Each upload is written to a temporary `<name>.part-<16 hex digits>` file next to its target and then renamed into place; when the target already exists it is moved aside first and moved back if the swap fails, so there is never a moment when neither the old nor the new object exists. Temporary names are left out of listings and removed when an upload fails; one left by a timeout or a dropped connection stays on the server (hidden from listings) until you delete it. A connection is opened for each upload, listing and download and closed after it; one that is silent for 120 seconds is dropped.
 
 **Credentials.** Each secret is written in the file (`x`) or named as an environment variable (`x_env`), not both; the variable must be set and not blank when the daemon starts or startup fails naming it (never its value), and surrounding whitespace such as a trailing newline is removed. A blank value written in the file is an error. An S3 target takes `access_key` and `secret_key` together, both in the file or both as `_env`, or neither. An Azure target takes an access key or a SAS token, not both. A SAS token may be pasted as the portal shows it, percent-encoding and leading `?` included.
 
@@ -451,9 +473,9 @@ When a target gives its own credentials, nothing in the environment can change i
 
 **Replaces the older keys.** `backend`, `secondary` and the `[storage.s3]`, `[storage.r2]` and `[storage.minio]` sections still work and are read as targets named `s3`, `r2` and `minio`; they cannot be combined with `[[storage.targets]]`, and the daemon refuses to start with both. Two small changes came with the move: `r2` now addresses its bucket in the URL path (it works the same), and an `[storage.s3]` with an IP address or bare host name as `endpoint` is addressed by path automatically, as before. To move to the list, write one target per store you use and keep the same names, so chunks waiting for upload keep their markers. With `backend = "local"` no target is used.
 
-**Tested with:** requests to local fake servers, which check the URL, headers and body each store type sends and that a big chunk goes up in parts (these run with the tests); by hand, S3-style uploads, including a 20 MiB chunk in parts, to a local S3 server (moto) and Azure Blob Storage, including a 20 MiB chunk in parts, to the Azurite emulator, with credentials from environment variables, with encryption, and with one store down and back. Google Cloud Storage was only checked against the local fake server (the PUT it sends to the `gcs_base_url` of a service-account file) and a locally run `fake-gcs-server`, which accepts the connection but not the XML-API upload the crate uses, so a real upload to Google Cloud Storage is untested. Real AWS, Azure and GCS accounts were not used.
+**Tested with:** requests to local fake servers, which check the URL, headers and body each store type sends and that a big chunk goes up in parts (these run with the tests); by hand, S3-style uploads, including a 20 MiB chunk in parts, to a local S3 server (moto) and Azure Blob Storage, including a 20 MiB chunk in parts, to the Azurite emulator, with credentials from environment variables, with encryption, and with one store down and back. Google Cloud Storage was only checked against the local fake server (the PUT it sends to the `gcs_base_url` of a service-account file) and a locally run `fake-gcs-server`, which accepts the connection but not the XML-API upload the crate uses, so a real upload to Google Cloud Storage is untested. WebDAV was run by hand against Apache `mod_dav` and SFTP against OpenSSH, both in containers: encrypted upload with `delete_after_upload`, `storage restore`, and queries over the restored data; SFTP also with a key login, a wrong password and a wrong host key. Real AWS, Azure and GCS accounts were not used.
 
-**Not covered:** stores with neither the S3 API nor Azure or Google's, such as SFTP or WebDAV. The upload code calls a single small `put` function, so one is an extra implementation of it and an extra `type`; ask if you need one. Queries only ever read the local data directory, so with `delete_after_upload` uploaded data is not searchable until it is restored (below).
+**Not covered:** stores that speak none of S3, Azure, Google, WebDAV or SFTP. The upload code calls a small `put`, `list` and `get`, so one more is an extra implementation of them and an extra `type`. Queries only ever read the local data directory, so with `delete_after_upload` uploaded data is not searchable until it is restored (below).
 
 ### Restoring chunks
 

@@ -157,6 +157,39 @@ pub enum TargetKind {
         #[serde(default)]
         sas_token_env: Option<String>,
     },
+    /// A WebDAV server (Nextcloud, ownCloud, Apache `mod_dav`, `rclone serve webdav`, ...).
+    Webdav {
+        /// The collection uploads go under, `https://host/remote.php/dav/files/me/logs`.
+        url: String,
+        #[serde(default)]
+        username: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
+        #[serde(default)]
+        password_env: Option<String>,
+    },
+    /// A directory on an SSH server, over SFTP.
+    Sftp {
+        host: String,
+        #[serde(default = "defaults::sftp_port")]
+        port: u16,
+        username: String,
+        /// The server's host key as `ssh-keygen -lf` prints it (`SHA256:...`). Required: without
+        /// it anyone on the path could pose as the server and receive the logs.
+        host_key: String,
+        /// A private key file (OpenSSH, PEM or PuTTY format).
+        #[serde(default)]
+        key_file: Option<String>,
+        #[serde(default)]
+        key_passphrase_env: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
+        #[serde(default)]
+        password_env: Option<String>,
+        /// The directory uploads go under; the login directory when unset.
+        #[serde(default)]
+        path: Option<String>,
+    },
     /// Google Cloud Storage, through its own API.
     Gcs {
         bucket: String,
@@ -195,6 +228,8 @@ impl TargetKind {
             Self::S3 { .. } => "s3",
             Self::Azure { .. } => "azure",
             Self::Gcs { .. } => "gcs",
+            Self::Webdav { .. } => "webdav",
+            Self::Sftp { .. } => "sftp",
         }
     }
 }

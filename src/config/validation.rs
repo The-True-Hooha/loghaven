@@ -226,6 +226,84 @@ fn validate_targets(config: &Config) -> Result<()> {
                     return bad(format!("{at}: use an access key or a SAS token, not both"));
                 }
             }
+            super::TargetKind::Webdav {
+                url,
+                username,
+                password,
+                password_env,
+            } => {
+                check_endpoint(&format!("{at}.url"), url)?;
+                let parsed = reqwest::Url::parse(url)
+                    .map_err(|_| LogHavenError::Config(format!("{at}.url is not a valid URL")))?;
+                if !parsed.username().is_empty() || parsed.password().is_some() {
+                    return bad(format!(
+                        "{at}: url must not carry a user name or password; use username and password"
+                    ));
+                }
+                let host = parsed.host_str().unwrap_or("").trim_matches(['[', ']']);
+                let loopback = host == "localhost"
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback());
+                if parsed.scheme() == "http" && username.is_some() && !loopback {
+                    return bad(format!(
+                        "{at}: a login must not be sent over http:// except to this machine; use https://"
+                    ));
+                }
+                if username.as_deref().is_some_and(|u| u.trim().is_empty()) {
+                    return bad(format!("{at}: username is empty"));
+                }
+                one_source(&at, "password", password, password_env)?;
+                if username.is_some() != (password.is_some() || password_env.is_some()) {
+                    return bad(format!("{at}: give username and password together"));
+                }
+            }
+            super::TargetKind::Sftp {
+                host,
+                port,
+                username,
+                host_key,
+                key_file,
+                key_passphrase_env,
+                password,
+                password_env,
+                path,
+            } => {
+                if host.trim().is_empty() || host.contains(['/', ' ', '@']) {
+                    return bad(format!("{at}: host must be a host name or address"));
+                }
+                if *port == 0 {
+                    return bad(format!("{at}: port must be between 1 and 65535"));
+                }
+                if username.trim().is_empty() {
+                    return bad(format!("{at}: username is required"));
+                }
+                if !host_key.strip_prefix("SHA256:").is_some_and(|h| {
+                    h.len() == 43
+                        && h.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+                }) {
+                    return bad(format!(
+                        "{at}: host_key must be the server's key fingerprint as ssh-keygen -lf prints it (SHA256:...)"
+                    ));
+                }
+                one_source(&at, "password", password, password_env)?;
+                if key_file.as_deref().is_some_and(|k| k.trim().is_empty()) {
+                    return bad(format!("{at}: key_file is empty"));
+                }
+                let has_password = password.is_some() || password_env.is_some();
+                if key_file.is_some() == has_password {
+                    return bad(format!(
+                        "{at}: give a key_file or a password, one of the two"
+                    ));
+                }
+                if key_passphrase_env.is_some() && key_file.is_none() {
+                    return bad(format!("{at}: key_passphrase_env needs a key_file"));
+                }
+                if let Some(p) = path {
+                    check_prefix(&format!("{at}.path"), p)?;
+                }
+            }
             super::TargetKind::Gcs { bucket, .. } => {
                 if bucket.is_empty() {
                     return bad(format!("{at}: bucket is required"));

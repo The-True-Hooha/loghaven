@@ -51,6 +51,10 @@ pub fn rotate_size_mb() -> u64 {
     128
 }
 
+pub fn sftp_port() -> u16 {
+    22
+}
+
 pub fn rotate_records() -> u64 {
     500_000
 }

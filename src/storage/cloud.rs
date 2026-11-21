@@ -6,8 +6,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 const SYNCED_SUFFIX: &str = "synced";
-const PUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub(crate) const PUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Where chunks are uploaded. The seam of the storage layer: the upload code only ever calls
 /// `put`, so the encryption, markers, retries and pruning work for every store. Implemented once
@@ -37,7 +37,7 @@ const PART_SIZE: usize = 8 * 1024 * 1024;
 const MIN_BYTES_PER_SEC: u64 = 256 * 1024;
 
 /// An upload is given `PUT_TIMEOUT` plus the time its size needs at `MIN_BYTES_PER_SEC`.
-fn upload_budget(bytes: u64) -> std::time::Duration {
+pub(crate) fn upload_budget(bytes: u64) -> std::time::Duration {
     PUT_TIMEOUT + std::time::Duration::from_secs(bytes / MIN_BYTES_PER_SEC)
 }
 
@@ -163,12 +163,65 @@ impl Target {
 
     /// A store set up from one `[[storage.targets]]` entry.
     pub fn from_config(t: &crate::config::StorageTarget) -> Result<Self> {
-        let store = crate::storage::stores::build(t)?;
-        Ok(Self::new(
-            &t.name,
-            Box::new(CrateStore(store)),
-            t.prefix.clone(),
-        ))
+        let store: Box<dyn ObjectStore> = match &t.kind {
+            crate::config::TargetKind::Webdav {
+                url,
+                username,
+                password,
+                password_env,
+            } => {
+                let password =
+                    crate::storage::stores::secret(&t.name, "password", password, password_env)?;
+                Box::new(crate::storage::webdav::WebDavStore::new(
+                    url,
+                    username.clone().zip(password),
+                )?)
+            }
+            crate::config::TargetKind::Sftp {
+                host,
+                port,
+                username,
+                host_key,
+                key_file,
+                key_passphrase_env,
+                password,
+                password_env,
+                path,
+            } => {
+                use crate::storage::sftp::{Login, SftpStore};
+                let password =
+                    crate::storage::stores::secret(&t.name, "password", password, password_env)?;
+                let passphrase = crate::storage::stores::secret(
+                    &t.name,
+                    "key_passphrase",
+                    &None,
+                    key_passphrase_env,
+                )?;
+                let login = match (key_file, password) {
+                    (Some(file), None) => Login::Key {
+                        file: file.into(),
+                        passphrase,
+                    },
+                    (None, Some(pw)) => Login::Password(pw),
+                    _ => {
+                        return Err(LogHavenError::Config(format!(
+                            "storage target '{}': give a key_file or a password",
+                            t.name
+                        )));
+                    }
+                };
+                Box::new(SftpStore::new(
+                    host,
+                    *port,
+                    username,
+                    login,
+                    host_key,
+                    path.as_deref().unwrap_or(""),
+                ))
+            }
+            _ => Box::new(CrateStore(crate::storage::stores::build(t)?)),
+        };
+        Ok(Self::new(&t.name, store, t.prefix.clone()))
     }
 
     pub fn label(&self) -> &str {
@@ -188,6 +241,11 @@ impl Target {
             .into_iter()
             .filter_map(|k| k.strip_prefix(&strip).map(String::from))
             .collect())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn put_for_test(&self, name: &str, file: &Path) -> Result<()> {
+        self.store.put(&self.under_prefix(name), file).await
     }
 
     pub async fn get_named(&self, name: &str, max_bytes: u64) -> Result<Vec<u8>> {

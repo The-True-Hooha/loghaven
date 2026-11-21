@@ -47,7 +47,7 @@ const MAX_ERROR_CHARS: usize = 300;
 /// The secret from the config, or from the environment variable that names it. Neither is
 /// `None` (ambient credentials). Errors name the variable, never a value. Surrounding whitespace
 /// is removed, as a value copied from a file usually ends in a newline.
-fn secret(
+pub(crate) fn secret(
     target: &str,
     what: &str,
     plain: &Option<String>,
@@ -209,6 +209,10 @@ pub fn build(t: &StorageTarget) -> Result<Arc<dyn ObjectStore>> {
             }
             Ok(Arc::new(b.build().map_err(built)?))
         }
+        TargetKind::Webdav { .. } | TargetKind::Sftp { .. } => Err(config_err(
+            name,
+            "this target type is not served by the object_store crate".into(),
+        )),
     }
 }
 

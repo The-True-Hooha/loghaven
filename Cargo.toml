@@ -30,12 +30,17 @@ sha2 = "0.10"
 rsa = { version = "0.9", features = ["pem"] }
 hex = "0.4"
 axum = "0.8"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 ratatui = "0.30"
 aes-gcm = "0.10"
 object_store = { version = "0.14", default-features = false, features = ["aws", "gcp", "azure"] }
+quick-xml = "0.38"
+percent-encoding = "2"
+tokio-util = { version = "0.7", features = ["io"] }
+russh = "0.65"
+russh-sftp = "3"
 
 [dev-dependencies]
 tempfile = "3"
