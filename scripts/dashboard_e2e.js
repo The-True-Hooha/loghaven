@@ -19,9 +19,8 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   const browser = await engine.launch();
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 700 } });
   const page = await ctx.newPage();
-  const dialogs = [], consoleMsgs = [], referers = [];
+  const dialogs = [], referers = [];
   page.on('dialog', d => { dialogs.push(d.message()); d.dismiss(); });
-  page.on('console', m => consoleMsgs.push(m.text()));
   page.on('request', r => referers.push([r.url(), r.headers()['referer']]));
   await page.goto(url);
   await page.waitForSelector('#rows tr', { timeout: 8000 });
@@ -36,9 +35,9 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   ok(referers.every(([, r]) => !r), 'no Referer header sent');
   ok(!(await page.evaluate(() => JSON.stringify(sessionStorage) + JSON.stringify(localStorage) + document.cookie)).match(/[0-9a-f]{64}/), 'token not in storage or cookies');
   // CSP: inline script and eval are blocked
-  await page.evaluate(() => { const s = document.createElement('script'); s.textContent = 'window.INLINE=1'; document.body.append(s); });
+  await page.evaluate(() => { window.VIOLATIONS = 0; document.addEventListener('securitypolicyviolation', () => window.VIOLATIONS++); const s = document.createElement('script'); s.textContent = 'window.INLINE=1'; document.body.append(s); });
   ok((await page.evaluate(() => window.INLINE)) === undefined, 'CSP blocks inline script');
-  ok(consoleMsgs.some(m => /Content Security Policy/i.test(m)), 'CSP violation reported');
+  ok((await page.evaluate(() => window.VIOLATIONS)) >= 1, 'CSP violation reported (securitypolicyviolation event; Firefox logs it only to devtools)');
   // interactions
   await page.locator('#rows tr', { hasText: 'payment confirmed' }).click();
   ok(await page.locator('#detail').isVisible(), 'detail opens');
