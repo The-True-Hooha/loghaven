@@ -75,3 +75,5 @@ jobs:
         run: scripts/realtests/diskfull.sh target/debug/loghaven
       - name: Store cut
         run: scripts/realtests/storecut.sh target/debug/loghaven /tmp/big.parquet
+      - name: TUI in a pseudo-terminal
+        run: scripts/realtests/tui.sh target/debug/loghaven
