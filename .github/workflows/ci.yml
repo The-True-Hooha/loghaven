@@ -47,6 +47,32 @@ jobs:
           DASHBOARD_BROWSERS: chromium firefox webkit
         run: scripts/e2e.sh target/debug/loghaven
 
+  e2e-platforms:
+    name: End to end (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build
+        run: cargo build
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --no-save --no-package-lock playwright@1.49.1
+          npx playwright install chromium
+      - name: Run end-to-end checks
+        run: scripts/e2e.sh target/debug/loghaven
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
