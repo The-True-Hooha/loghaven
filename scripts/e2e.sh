@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # End-to-end checks against a real daemon in an isolated HOME: sessions across a restart,
 # the chain adapters against the fake nodes in scripts/, the dashboard in headless
-# Chromium and the terminal UI in a pseudo-terminal.
+# Chromium (and Firefox and WebKit when asked) and the terminal UI in a pseudo-terminal.
 #
 # Usage: scripts/e2e.sh [path to the loghaven binary]
-# Needs python3, curl, node with `playwright` installed (npm i playwright && npx playwright install chromium).
+# Needs python3, curl, node with `playwright` installed (npm i playwright && npx playwright install chromium). DASHBOARD_BROWSERS="chromium firefox webkit" runs the dashboard script in each.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -92,12 +92,15 @@ start_daemon
 check "session works after kill -9" '[ "$(status "$TOKEN")" = 200 ]'
 check "a foreign Host is refused" '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" http://127.0.0.1:9200/logs?app=web)" = 403 ]'
 
-echo "== dashboard in headless Chromium"
-if command -v node >/dev/null && (cd "$ROOT/scripts" && node -e "require('playwright')" 2>/dev/null); then
-  check "dashboard script" 'HOME=$REAL_HOME node "$ROOT/scripts/dashboard_e2e.js" "$("$BIN" dashboard --app web --no-open)" "$WORK" > "$WORK/dashboard.out" 2>&1 || { cat "$WORK/dashboard.out"; false; }'
-else
-  fail "dashboard script (playwright is not installed)"
-fi
+BROWSERS=${DASHBOARD_BROWSERS:-chromium}
+for B in $BROWSERS; do
+  echo "== dashboard in headless $B"
+  if command -v node >/dev/null && (cd "$ROOT/scripts" && node -e "require('playwright')" 2>/dev/null); then
+    check "dashboard script ($B)" 'HOME=$REAL_HOME BROWSER=$B node "$ROOT/scripts/dashboard_e2e.js" "$("$BIN" dashboard --app web --no-open)" "$WORK" > "$WORK/dashboard-$B.out" 2>&1 || { cat "$WORK/dashboard-$B.out"; false; }'
+  else
+    fail "dashboard script (playwright is not installed)"
+  fi
+done
 
 echo "== terminal UI in a pseudo-terminal"
 check "tui" 'python3 "$ROOT/scripts/tui_e2e.py" "$BIN" tuiapp "evil" > "$WORK/tui.out" 2>&1 || { cat "$WORK/tui.out"; false; }'
