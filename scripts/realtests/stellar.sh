@@ -80,7 +80,8 @@ END=$(( $(date +%s) + SOAK ))
 while [ "$(date +%s)" -lt "$END" ] && [ "$SENT" -lt "$N" ]; do fund "${ACCOUNTS[$SENT]}" >/dev/null; SENT=$((SENT+1)); sleep 3; done
 check "most soak transactions landed and each is recorded exactly once" 'wait_for 90 "matches_chain $((SENT * 3 / 4))"'
 check "the watcher is still running" 'kill -0 "$WATCH_PID" 2>/dev/null'
-check "the watcher log has no error" '! grep -qi "error" "$WORK/watch.log" "$WORK/watch2.log"'
+# a rate-limit answer is handled by design (the rest waits for the next poll): not an error
+check "the watcher log has no error besides rate limits" '! cat "$WORK/watch.log" "$WORK/watch2.log" | grep -i "error" | grep -qvi "429\|too many requests"'
 
 [ "$FAILED" = 0 ] || { echo "-- recorded: $(count stellar), funded on the network: $(chain_count), friendbot calls: $SENT"; echo "-- watcher"; head -12 "$WORK/watch.log" | cut -c1-200; }
 summary

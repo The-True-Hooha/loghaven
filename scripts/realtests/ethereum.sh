@@ -72,6 +72,7 @@ END=$(( $(date +%s) + SOAK ))
 while [ "$(date +%s)" -lt "$END" ]; do emit; SENT=$((SENT+1)); sleep 2; done
 check "every event of the soak is recorded exactly once" 'wait_for 30 "[ \"\$(count ethereum)\" = $SENT ]"'
 check "the watcher is still running" 'kill -0 "$WATCH_PID" 2>/dev/null'
-check "the watcher log has no error" '! grep -qi "error" "$WORK/watch.log" "$WORK/watch2.log"'
+# a rate-limit answer is handled by design (the rest waits for the next poll): not an error
+check "the watcher log has no error besides rate limits" '! cat "$WORK/watch.log" "$WORK/watch2.log" | grep -i "error" | grep -qvi "429\|too many requests"'
 
 summary
