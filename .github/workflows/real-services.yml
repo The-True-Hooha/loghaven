@@ -2,7 +2,7 @@ name: Real services
 
 # Runs the suites in scripts/realtests against real server software in containers: the S3 API
 # (MinIO, RustFS), Azure (Azurite), SFTP (OpenSSH), WebDAV (Apache), Ethereum (Anvil), Stellar
-# (stellar/quickstart) and Solana (Agave test validator). Started by hand, or by a change to the
+# (stellar/quickstart) and Solana (Agave test validator), plus load and failure runs. Started by hand, or by a change to the
 # suites themselves.
 on:
   workflow_dispatch:
@@ -56,3 +56,22 @@ jobs:
         run: podman build --platform linux/amd64 -t lh-solana-test:2.3.13 -f scripts/realtests/solana.Containerfile .
       - name: Solana (test validator)
         run: scripts/realtests/solana.sh target/debug/loghaven
+
+  load:
+    name: Load and failure
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build
+      - name: A 100 MiB chunk
+        run: LH_BIG_CHUNK=/tmp/big.parquet LH_BIG_CHUNK_MB=100 cargo test make_big_chunk -- --ignored --nocapture
+      - name: UDP load and kill -9
+        run: scripts/realtests/load.sh target/debug/loghaven
+      - name: Disk full
+        run: scripts/realtests/diskfull.sh target/debug/loghaven
+      - name: Store cut
+        run: scripts/realtests/storecut.sh target/debug/loghaven /tmp/big.parquet

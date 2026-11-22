@@ -7,6 +7,7 @@ use crate::storage::writer::{remove_stale_tmp, write_chunk};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, interval};
 
@@ -15,6 +16,7 @@ const MAX_BATCH: usize = 10_000;
 const MAX_PENDING: usize = 100_000;
 const MAX_PENDING_BYTES: usize = 256 * 1024 * 1024;
 const SHUTDOWN_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+const SYNC_RETRY: Duration = Duration::from_secs(60);
 
 enum WriteCommand {
     Record(Box<LogRecord>),
@@ -59,6 +61,8 @@ impl LocalBackend {
             cloud_syncer,
             sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             sync_tasks: Vec::new(),
+            sync_failed: Arc::new(AtomicBool::new(false)),
+            sync_started: tokio::time::Instant::now(),
             pending: Vec::new(),
         };
         // chunks left over from a previous run (failed or interrupted uploads)
@@ -120,6 +124,10 @@ struct ChunkFlusher {
     cloud_syncer: Option<Arc<CloudSyncer>>,
     sync_lock: Arc<tokio::sync::Mutex<()>>,
     sync_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// Set by an upload run that left chunks behind. Without it a store that was down
+    /// would see no retry until this app wrote another chunk or the daemon restarted.
+    sync_failed: Arc<AtomicBool>,
+    sync_started: tokio::time::Instant,
     pending: Vec<LogRecord>,
 }
 
@@ -259,10 +267,19 @@ impl ChunkFlusher {
         let syncer = Arc::clone(syncer);
         let lock = Arc::clone(&self.sync_lock);
         let app_dir = self.app_dir.clone();
+        let failed = Arc::clone(&self.sync_failed);
+        self.sync_started = tokio::time::Instant::now();
         self.sync_tasks.push(tokio::spawn(async move {
             let _serial = lock.lock().await;
-            syncer.sync_app(&app_dir).await;
+            failed.store(syncer.sync_app(&app_dir).await > 0, Ordering::Relaxed);
         }));
+    }
+
+    /// Uploads again, at most once per `SYNC_RETRY`, after a run that left chunks behind.
+    fn retry_failed_sync(&mut self) {
+        if self.sync_failed.load(Ordering::Relaxed) && self.sync_started.elapsed() >= SYNC_RETRY {
+            self.trigger_sync();
+        }
     }
 
     /// Waits for running uploads, then uploads whatever is still unsynced.
@@ -327,6 +344,7 @@ async fn writer_task(
                 if let Err(e) = flusher.flush().await {
                     eprintln!("Storage flush error: {}", e);
                 }
+                flusher.retry_failed_sync();
             }
         }
     }
@@ -766,6 +784,35 @@ mod tests {
             0,
             "deleted chunks are not queryable"
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_app_uploads_its_kept_chunk_once_the_store_is_back() {
+        let (mut cfg, tmp, syncer, store) = cfg_with_syncer("idle-retry", true, 0);
+        cfg.flush_interval_secs = 10;
+        store
+            .fail_all
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let b = LocalBackend::new_with_syncer("web".into(), &cfg, Some(syncer)).unwrap();
+        b.write(rec("web", 1_700_000_000_000, "m")).await.unwrap();
+        b.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(
+            parquet_files(&tmp, "web").len(),
+            1,
+            "kept while the store is down"
+        );
+
+        store
+            .fail_all
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(
+            parquet_files(&tmp, "web").is_empty(),
+            "uploaded and deleted with no new write and no restart"
+        );
+        assert_eq!(store.puts.lock().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
