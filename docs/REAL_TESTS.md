@@ -19,6 +19,7 @@ Run on 2026-11-21 and 2026-11-22. "Linux" is a GitHub-hosted `ubuntu-latest` run
 
 | Dashboard | Playwright `1.49.1`: Chromium, Firefox, WebKit (`scripts/dashboard_e2e.js`) | Linux (all three, in the `End to end` CI job on Ubuntu 24.04); macOS (Chromium and WebKit; Firefox does not launch there) | rendering, text shown as text, CSP, no token in URL, storage or Referer, filters, trace, phone width, dark theme, bad token, foreign Host |
 | TUI | `loghaven tui` in a pseudo-terminal against a live daemon (`tui.sh`) | Linux, macOS | redraw after a resize (shrink and grow), polling error while the daemon is killed, reconnect and a new record after it restarts, exit 0 on `q` |
+| End to end | `scripts/e2e.sh`: daemon, dashboard (Chromium), chain adapters against the fake nodes | macOS and Windows (GitHub-hosted `macos-latest`, `windows-latest` under Git Bash), plus Linux | sessions across restart and a hard kill, foreign Host refused, dashboard, mock chains. On Windows the hard kill is `loghaven stop --force` and the TUI check is skipped (no `pty` module) |
 | Load | the daemon, UDP ingest from a Python sender (`load.sh`) | Linux, macOS | 500 to 20 000 records/s for 10 s each, loss and duplicates counted; `kill -9` under load |
 | Disk full | the daemon on a 16 MiB volume (`diskfull.sh`) | macOS only (the script needs `sudo mount` on Linux, not run) | writes fail, the daemon stays up, stored records stay queryable, writes resume |
 | Store cut | MinIO stopped and started under the daemon (`storecut.sh`) | Linux, macOS | store down between uploads; store cut during a 100 MiB upload |
@@ -39,7 +40,8 @@ Run on 2026-11-21 and 2026-11-22. "Linux" is a GitHub-hosted `ubuntu-latest` run
 - **`wss://` against a node of our own.** Anvil has no TLS and the watcher trusts only the built-in public roots. `wss://` was run against a public node earlier (see `docs/CONFIGURATION.md`).
 - **Disk full on Linux**, load above what the Python sender can produce, and load with several apps at once.
 - **The dashboard on a real phone or an older browser version**; only the engines Playwright 1.49.1 ships were run.
-- **Public chains for longer than a spot run and Windows and macOS runners for `scripts/e2e.sh`** are planned in `docs/PLAN.md` and have no results yet.
+- **Public chains for longer than a spot run** are planned in `docs/PLAN.md` and have no results yet.
+- **The TUI on Windows**: there is no pseudo-terminal test there. The Windows hard-kill check uses `loghaven stop --force`, not an external `taskkill`.
 
 ## Bugs these runs found
 
