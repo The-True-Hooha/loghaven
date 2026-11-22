@@ -87,7 +87,9 @@ sleep 2
 stop_daemon
 start_daemon
 check "session works after a restart" '[ "$(status "$TOKEN")" = 200 ]'
-kill -9 "$(pgrep -f "$BIN run" | head -1)"; sleep 1
+WINDOWS=; case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) WINDOWS=1 ;; esac
+# no pgrep or POSIX signals under Git Bash: `stop --force` is the daemon's own hard kill there
+if [ -n "$WINDOWS" ]; then "$BIN" stop --force >/dev/null 2>&1; else kill -9 "$(pgrep -f "$BIN run" | head -1)"; fi; sleep 1
 start_daemon
 check "session works after kill -9" '[ "$(status "$TOKEN")" = 200 ]'
 check "a foreign Host is refused" '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" http://127.0.0.1:9200/logs?app=web)" = 403 ]'
@@ -103,7 +105,9 @@ for B in $BROWSERS; do
 done
 
 echo "== terminal UI in a pseudo-terminal"
+if [ -n "$WINDOWS" ]; then echo "SKIP tui (Python's pty module does not exist on Windows)"; else
 check "tui" 'python3 "$ROOT/scripts/tui_e2e.py" "$BIN" tuiapp "evil" > "$WORK/tui.out" 2>&1 || { cat "$WORK/tui.out"; false; }'
+fi
 
 echo "== chain adapters against the fake nodes"
 echo 1000 > "$WORK/eth/head"
