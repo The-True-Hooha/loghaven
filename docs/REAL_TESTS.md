@@ -27,7 +27,7 @@ Run on 2026-11-21 and 2026-11-22. "Linux" is a GitHub-hosted `ubuntu-latest` run
 
 **Load results.** On Linux the sender reached 500, 2 000, 5 000 and 10 000 records/s with every record stored once (0 lost, 0 duplicated). At a 20 000 records/s target the Python sender managed 12 600/s on the runner (19 700/s on the laptop) and again lost none. No overload point was found: the limit here was the sender, not the daemon. Records are one per datagram; larger batches were not run.
 
-**`kill -9`.** The daemon was killed 4 s into a 5 000 records/s run with a 1 s flush interval, and restarted. Records sent after the kill are lost because the sender had stopped. About a quarter of the sent records were not stored (24.9% on Linux, 24.3% on macOS): those are the records after the kill that the sender did not send plus those still buffered in memory when the process died. The run does not separate the two, so it shows no duplicates and a working restart, not how much buffered data a crash costs. A `.parquet.tmp` file cut off by the kill stays until the app writes again, then is removed.
+**`kill -9`.** The daemon was killed 4 s into a 5 000 records/s run with a 1 s flush interval, then restarted. The sender stops at the kill, so every record counted as sent was sent before it. About a quarter of them were not stored (24.9% on Linux, 24.3% on macOS, roughly 5 000 records): records still in memory or in the socket buffer when the process died. That is more than one flush interval's worth, so a crash can cost more than the interval suggests; this run did not find where the rest was held. Nothing was duplicated and the restart worked. A `.parquet.tmp` file cut off by the kill stays until the app writes again, then is removed.
 
 ## What is not covered
 
