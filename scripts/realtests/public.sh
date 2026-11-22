@@ -22,7 +22,7 @@ cleanup() { stop_watchers; stop_daemon; [ "$FAILED" = 0 ] && rm -rf "$WORK" || e
 trap cleanup EXIT
 
 # Horizon accounts that were busy a moment ago, found now: no address is hard-coded to go stale
-BUSY=$(curl -s "https://horizon.stellar.org/operations?order=desc&limit=200&include_failed=false" | python3 -I -c "
+BUSY=$(curl -s --compressed "https://horizon.stellar.org/operations?order=desc&limit=200&include_failed=false" | python3 -I -c "
 import json,sys,collections
 c=collections.Counter(r.get('source_account') for r in json.load(sys.stdin)['_embedded']['records'])
 print(','.join(a for a,_ in c.most_common(5) if a))")
