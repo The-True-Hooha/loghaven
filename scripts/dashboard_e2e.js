@@ -1,23 +1,26 @@
-// Drives the dashboard in headless Chromium. Needs `npm i playwright && npx playwright install chromium`.
+// Drives the dashboard in a headless browser: BROWSER=chromium (default), firefox or webkit. Needs
+// `npm i playwright && npx playwright install <browser>`.
 // Seed the app first (see docs/MANUAL_TESTING.md, "Phase 3: dashboard"), with exactly these three records:
 //   TX=0x$(printf 'cd%.0s' $(seq 32))
 //   loghaven send web 'plain hello'
 //   loghaven send web '<img src=x onerror="window.PWNED=1"><script>window.PWNED=2</script>' --level error --tx-hash $TX
 //   loghaven send web 'payment confirmed' --level warn --chain ethereum --tx-hash $TX
 // then: node scripts/dashboard_e2e.js "$(loghaven dashboard --app web --no-open)"
-const { chromium } = require('playwright');
+const playwright = require('playwright');
+const name = process.env.BROWSER || 'chromium';
+const engine = playwright[name];
+if (!engine) { console.error('BROWSER must be chromium, firefox or webkit'); process.exit(2); }
 const url = process.argv[2];
 const outDir = process.argv[3] || '.';
 if (!url) { console.error('usage: node dashboard_e2e.js <dashboard url> [screenshot dir]'); process.exit(2); }
 const TX = '0x' + 'cd'.repeat(32);
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 (async () => {
-  const browser = await chromium.launch();
+  const browser = await engine.launch();
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 700 } });
   const page = await ctx.newPage();
-  const dialogs = [], consoleMsgs = [], referers = [];
+  const dialogs = [], referers = [];
   page.on('dialog', d => { dialogs.push(d.message()); d.dismiss(); });
-  page.on('console', m => consoleMsgs.push(m.text()));
   page.on('request', r => referers.push([r.url(), r.headers()['referer']]));
   await page.goto(url);
   await page.waitForSelector('#rows tr', { timeout: 8000 });
@@ -32,9 +35,9 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   ok(referers.every(([, r]) => !r), 'no Referer header sent');
   ok(!(await page.evaluate(() => JSON.stringify(sessionStorage) + JSON.stringify(localStorage) + document.cookie)).match(/[0-9a-f]{64}/), 'token not in storage or cookies');
   // CSP: inline script and eval are blocked
-  await page.evaluate(() => { const s = document.createElement('script'); s.textContent = 'window.INLINE=1'; document.body.append(s); });
+  await page.evaluate(() => { window.VIOLATIONS = 0; document.addEventListener('securitypolicyviolation', () => window.VIOLATIONS++); const s = document.createElement('script'); s.textContent = 'window.INLINE=1'; document.body.append(s); });
   ok((await page.evaluate(() => window.INLINE)) === undefined, 'CSP blocks inline script');
-  ok(consoleMsgs.some(m => /Content Security Policy/i.test(m)), 'CSP violation reported');
+  ok((await page.evaluate(() => window.VIOLATIONS)) >= 1, 'CSP violation reported (securitypolicyviolation event; Firefox logs it only to devtools)');
   // interactions
   await page.locator('#rows tr', { hasText: 'payment confirmed' }).click();
   ok(await page.locator('#detail').isVisible(), 'detail opens');
@@ -53,9 +56,9 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   await page.fill('#text', '');
   await page.click('#follow');
   ok((await page.locator('#status').innerText()) === 'paused', 'pause');
-  await page.screenshot({ path: outDir + '/dash-light.png' });
+  await page.screenshot({ path: outDir + '/dash-light-' + name + '.png' });
   await page.emulateMedia({ colorScheme: 'dark' });
-  await page.screenshot({ path: outDir + '/dash-dark.png' });
+  await page.screenshot({ path: outDir + '/dash-dark-' + name + '.png' });
   // phone width
   await page.setViewportSize({ width: 375, height: 700 });
   ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'no horizontal scroll at 375px');

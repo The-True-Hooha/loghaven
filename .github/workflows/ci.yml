@@ -23,7 +23,8 @@ jobs:
 
   e2e:
     name: End to end
-    runs-on: ubuntu-latest
+    # Playwright 1.49.1 knows the package names of 24.04, not of the newer image behind ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -33,15 +34,17 @@ jobs:
           node-version: 22
       - name: Build
         run: cargo build
-      - name: Install Playwright and Chromium
+      - name: Install Playwright and its browsers
         run: |
           npm install --no-save --no-package-lock playwright@1.49.1
           for attempt in 1 2 3; do
-            npx playwright install chromium && exit 0
+            npx playwright install --with-deps chromium firefox webkit && exit 0
             sleep 10
           done
           exit 1
       - name: Run end-to-end checks
+        env:
+          DASHBOARD_BROWSERS: chromium firefox webkit
         run: scripts/e2e.sh target/debug/loghaven
 
   build:
