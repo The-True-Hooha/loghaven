@@ -12,16 +12,50 @@ pub fn log_level() -> String {
     "info".to_string()
 }
 
+/// Directory-name prefix of a socket folder chosen because the default location was too long.
+pub const SHORT_SOCKET_DIR_PREFIX: &str = "loghaven-run-";
+
+/// `sun_path` holds 104 bytes on Apple and BSD targets and 108 elsewhere, including the final NUL.
+#[cfg(unix)]
+pub const SUN_PATH_MAX: usize = if cfg!(target_vendor = "apple") {
+    104
+} else {
+    108
+};
+
 pub fn socket_path() -> PathBuf {
     let base = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("loghaven");
 
     #[cfg(unix)]
-    return base.join("loghaven.sock");
+    return short_if_too_long(base.join("loghaven.sock"));
 
     #[cfg(windows)]
     return base.join("loghaven.pipe");
+}
+
+/// A deep home directory (a CI checkout, a test home) can push the default past the OS limit for
+/// unix socket paths. The daemon then binds a private folder in the temp directory instead, named
+/// after a hash of the default so one machine can run several homes.
+#[cfg(unix)]
+fn short_if_too_long(default: PathBuf) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    if default.as_os_str().as_bytes().len() < SUN_PATH_MAX {
+        return default;
+    }
+    let hash = default
+        .as_os_str()
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
+        });
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    dir.join(format!("{SHORT_SOCKET_DIR_PREFIX}{hash:08x}"))
+        .join("s")
 }
 
 pub fn tcp_port() -> u16 {
@@ -132,4 +166,39 @@ pub fn remote_fetch_mb() -> u64 {
 
 pub fn remote_max_days() -> u32 {
     14
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_default_socket_path_that_fits_is_kept() {
+        let p = PathBuf::from("/home/me/.local/share/loghaven/loghaven.sock");
+        assert_eq!(short_if_too_long(p.clone()), p);
+    }
+
+    #[test]
+    fn a_default_socket_path_that_is_too_long_moves_to_a_short_private_folder() {
+        use std::os::unix::ffi::OsStrExt;
+        let deep = PathBuf::from(format!("/{}/loghaven.sock", "d".repeat(SUN_PATH_MAX)));
+        let short = short_if_too_long(deep.clone());
+        assert!(
+            short.as_os_str().as_bytes().len() < SUN_PATH_MAX,
+            "{short:?}"
+        );
+        assert!(
+            short
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n.to_string_lossy().starts_with(SHORT_SOCKET_DIR_PREFIX))
+        );
+        assert_eq!(
+            short_if_too_long(deep.clone()),
+            short,
+            "stable for one default"
+        );
+        let other = PathBuf::from(format!("/{}/x/loghaven.sock", "d".repeat(SUN_PATH_MAX)));
+        assert_ne!(short_if_too_long(other), short, "one folder per home");
+    }
 }

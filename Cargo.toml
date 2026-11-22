@@ -1,6 +1,6 @@
 [package]
 name = "loghaven"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 authors = ["Davidhero"]
 license = "MIT OR Apache-2.0"
