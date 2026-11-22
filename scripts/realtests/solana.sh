@@ -42,12 +42,13 @@ WATCHED=$(keys pubkey /watched.json)
 send() { curl -s -m 30 -X POST -H 'content-type: application/json' \
   --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"requestAirdrop\",\"params\":[\"$WATCHED\",1000000]}" $RPC | grep -q '"result"'; }
 # what the chain holds for the address: the truth the watcher is compared with. The first
-# airdrop happens before the watcher starts, so the watcher does not record it.
+# airdrop happens before the watcher starts and is not recorded: BASE is how many the chain
+# held then.
 chain_count() { curl -s -m 30 -X POST -H 'content-type: application/json' \
   --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getSignaturesForAddress\",\"params\":[\"$WATCHED\",{\"limit\":1000,\"commitment\":\"confirmed\"}]}" $RPC \
-  | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]) - 1)'; }
+  | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]))'; }
 matches_chain() { # at least $1 transactions, and the watcher has exactly the chain's
-  local want; want=$(chain_count); [ "$want" -ge "$1" ] && [ "$(count solana)" = "$want" ]
+  local want; want=$(( $(chain_count) - BASE )); [ "$want" -ge "$1" ] && [ "$(count solana)" = "$want" ]
 }
 check "an airdrop to the watched address lands" 'send && wait_for 60 "[ \"\$(sol balance \"$WATCHED\" | cut -d. -f1 | tr -dc 0-9)\" != \"\" ] && [ \"\$(sol balance \"$WATCHED\")\" != \"0 SOL\" ]"'
 
@@ -61,6 +62,8 @@ addresses = ["$WATCHED"]
 poll_interval_secs = 2
 TOML
 start_daemon || exit 1
+check "the first airdrop is visible at the level the watcher reads" 'wait_for 60 "[ \"\$(chain_count)\" -ge 1 ]"'
+BASE=$(chain_count)
 
 echo "== a real validator"
 "$BIN" watch solana >"$WORK/watch.log" 2>&1 &
@@ -68,10 +71,10 @@ WATCH_PID=$!
 check "the watcher starts" 'wait_for 30 "grep -q Watching $WORK/watch.log"'
 sleep 6
 for _ in 1 2 3; do send; done
-check "the transfers that landed are recorded (at least 2 of 3)" 'wait_for 90 "matches_chain 2" || { echo "   chain=$(chain_count) watcher=$(count solana)"; false; }'
+check "the transfers that landed are recorded (at least 2 of 3)" 'wait_for 90 "matches_chain 2" || { echo "   chain=$(( $(chain_count) - BASE )) watcher=$(count solana)"; false; }'
 T0=$(date +%s)
 send
-check "a new transfer is recorded within a few polls" 'wait_for 60 "matches_chain 3" || { echo "   chain=$(chain_count) watcher=$(count solana)"; false; }'
+check "a new transfer is recorded within a few polls" 'wait_for 60 "matches_chain 3" || { echo "   chain=$(( $(chain_count) - BASE )) watcher=$(count solana)"; false; }'
 echo "   latency: $(( $(date +%s) - T0 )) s"
 SIG=$("$BIN" logs solana --limit 1 2>&1 | grep -o '[1-9A-HJ-NP-Za-km-z]\{80,90\}' | head -1)
 check "a record can be traced by signature" '[ -n "$SIG" ] && "$BIN" trace "$SIG" --app solana 2>&1 | grep -q "slot"'
@@ -81,15 +84,15 @@ stop_watch
 send; send
 "$BIN" watch solana >"$WORK/watch2.log" 2>&1 &
 WATCH_PID=$!
-check "transfers made while the watcher was down are recorded once" 'wait_for 90 "matches_chain 4" || { echo "   chain=$(chain_count) watcher=$(count solana)"; false; }'
+check "transfers made while the watcher was down are recorded once" 'wait_for 90 "matches_chain 4" || { echo "   chain=$(( $(chain_count) - BASE )) watcher=$(count solana)"; false; }'
 sleep 6
-check "nothing is repeated after the restart" 'matches_chain 4 || { echo "   chain=$(chain_count) watcher=$(count solana)"; false; }'
+check "nothing is repeated after the restart" 'matches_chain 4 || { echo "   chain=$(( $(chain_count) - BASE )) watcher=$(count solana)"; false; }'
 
 echo "== soak ($SOAK s, one transfer every 2 s)"
 SENT=6
 END=$(( $(date +%s) + SOAK ))
 while [ "$(date +%s)" -lt "$END" ]; do send && SENT=$((SENT+1)); sleep 2; done
-check "most soak transfers landed and each is recorded exactly once" 'wait_for 90 "matches_chain $((SENT * 3 / 4))" || { echo "   chain=$(chain_count) watcher=$(count solana)"; false; }'
+check "most soak transfers landed and each is recorded exactly once" 'wait_for 90 "matches_chain $((SENT * 3 / 4))" || { echo "   chain=$(( $(chain_count) - BASE )) watcher=$(count solana)"; false; }'
 check "the watcher is still running" 'kill -0 "$WATCH_PID" 2>/dev/null'
 check "the watcher log has no error" '! grep -qi "error" "$WORK/watch.log" "$WORK/watch2.log"'
 
