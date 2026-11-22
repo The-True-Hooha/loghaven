@@ -138,4 +138,33 @@ mod tests {
         left.sort();
         assert_eq!(left, ["1-3.parquet", "1-3.parquet.synced", "notes.txt"]);
     }
+
+    /// Makes the big chunk the real-service tests upload: `LH_BIG_CHUNK=<path> LH_BIG_CHUNK_MB=100
+    /// cargo test -- --ignored make_big_chunk`.
+    #[test]
+    #[ignore]
+    fn make_big_chunk() {
+        use rand::Rng;
+        const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let path = std::env::var("LH_BIG_CHUNK").expect("LH_BIG_CHUNK");
+        let mb: u64 = std::env::var("LH_BIG_CHUNK_MB")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+        let mut rng = rand::thread_rng();
+        let mut records = vec![];
+        let mut made = 0u64;
+        let ts = 1_704_110_400_000;
+        while made < mb * 1024 * 1024 * 4 / 3 {
+            let msg: String = (0..1024)
+                .map(|_| B64[rng.gen_range(0..B64.len())] as char)
+                .collect();
+            made += msg.len() as u64;
+            let mut r = LogRecord::new("web", "info", "big", msg);
+            r.timestamp_ms = ts + records.len() as i64;
+            records.push(r);
+        }
+        write_chunk(Path::new(&path), &records).unwrap();
+        println!("{} bytes", std::fs::metadata(&path).unwrap().len());
+    }
 }
