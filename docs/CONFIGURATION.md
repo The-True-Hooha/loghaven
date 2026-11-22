@@ -85,7 +85,7 @@ the configured `prefix`. Each upload times out after 120 s.
 | Key | Default | Notes |
 |-----|---------|-------|
 | `path` | `<data dir>/data` | Root of all app data. |
-| `flush_interval_secs` | `30` | Buffered records are written at least this often. This is also how long a new record can take to become queryable. |
+| `flush_interval_secs` | `30` | Buffered records are written at least this often. This is also how long a new record can take to become queryable, and how much a crash (`kill -9`, power loss) can lose: records still buffered in memory are not written. Measured in [REAL_TESTS.md](REAL_TESTS.md). |
 | `rotate_records` | `500000` | Maximum records per chunk file. |
 | `rotate_size_mb` | `128` | Ignored. Kept so old config files still load. |
 | `retention_days` | `30` | Day folders older than this are deleted. `0` keeps everything. |
