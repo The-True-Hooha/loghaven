@@ -41,11 +41,11 @@ WATCHED=$(keys pubkey /watched.json)
 # native x86 Linux host both work.
 send() { curl -s -m 30 -X POST -H 'content-type: application/json' \
   --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"requestAirdrop\",\"params\":[\"$WATCHED\",1000000]}" $RPC | grep -q '"result"'; }
-# what the chain holds for the address: the truth the watcher is compared with. The first
+# what the chain holds for the address at the level the watcher reads (finalized). The first
 # airdrop happens before the watcher starts and is not recorded: BASE is how many the chain
 # held then.
 chain_count() { curl -s -m 30 -X POST -H 'content-type: application/json' \
-  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getSignaturesForAddress\",\"params\":[\"$WATCHED\",{\"limit\":1000,\"commitment\":\"confirmed\"}]}" $RPC \
+  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getSignaturesForAddress\",\"params\":[\"$WATCHED\",{\"limit\":1000,\"commitment\":\"finalized\"}]}" $RPC \
   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]))'; }
 matches_chain() { # at least $1 transactions, and the watcher has exactly the chain's
   local want; want=$(( $(chain_count) - BASE )); [ "$want" -ge "$1" ] && [ "$(count solana)" = "$want" ]
@@ -62,7 +62,7 @@ addresses = ["$WATCHED"]
 poll_interval_secs = 2
 TOML
 start_daemon || exit 1
-check "the first airdrop is visible at the level the watcher reads" 'wait_for 60 "[ \"\$(chain_count)\" -ge 1 ]"'
+check "the first airdrop is finalized, so the first run starts after it" 'wait_for 60 "[ \"\$(chain_count)\" -ge 1 ]"'
 BASE=$(chain_count)
 
 echo "== a real validator"
