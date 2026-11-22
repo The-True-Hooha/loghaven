@@ -18,6 +18,7 @@ Run on 2026-11-21 and 2026-11-22. "Linux" is a GitHub-hosted `ubuntu-latest` run
 | Solana | Agave test validator `2.3.13` | Linux only | recording, restart, 60 s soak |
 
 | Dashboard | Playwright `1.49.1`: Chromium, Firefox, WebKit (`scripts/dashboard_e2e.js`) | Linux (all three, in the `End to end` CI job on Ubuntu 24.04); macOS (Chromium and WebKit; Firefox does not launch there) | rendering, text shown as text, CSP, no token in URL, storage or Referer, filters, trace, phone width, dark theme, bad token, foreign Host |
+| TUI | `loghaven tui` in a pseudo-terminal against a live daemon (`tui.sh`) | macOS (Linux: see the PR's run) | redraw after a resize (shrink and grow), polling error while the daemon is killed, reconnect and a new record after it restarts, exit 0 on `q` |
 | Load | the daemon, UDP ingest from a Python sender (`load.sh`) | Linux, macOS | 500 to 20 000 records/s for 10 s each, loss and duplicates counted; `kill -9` under load |
 | Disk full | the daemon on a 16 MiB volume (`diskfull.sh`) | macOS only (the script needs `sudo mount` on Linux, not run) | writes fail, the daemon stays up, stored records stay queryable, writes resume |
 | Store cut | MinIO stopped and started under the daemon (`storecut.sh`) | Linux, macOS | store down between uploads; store cut during a 100 MiB upload |
@@ -63,6 +64,7 @@ scripts/realtests/solana.sh target/debug/loghaven
 scripts/realtests/load.sh target/debug/loghaven
 scripts/realtests/diskfull.sh target/debug/loghaven
 scripts/realtests/storecut.sh target/debug/loghaven /tmp/big.parquet
+scripts/realtests/tui.sh target/debug/loghaven
 ```
 
 Each script starts its own containers and an isolated daemon (ports 9200 and 9100 must be free), prints `PASS` and `FAIL` lines and tears everything down. `SOAK_SECONDS` sets the soak length of the chain suites.
