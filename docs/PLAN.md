@@ -26,7 +26,7 @@ Everything below the line "Real-service tests" runs only after the build phases 
 ### Phase 4: GCS correctness
 - Fix anything Phase 5 finds in the Google Cloud Storage path.
 
-## Real-service tests
+## Real-service tests (store, Ethereum, Stellar and Solana suites done; see docs/REAL_TESTS.md)
 
 Nothing mocked: real server software, real network, real browsers. Containers run under podman. Every run uses its own bucket or prefix and tears it down.
 
