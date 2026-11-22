@@ -20,6 +20,7 @@ Run on 2026-11-21 and 2026-11-22. "Linux" is a GitHub-hosted `ubuntu-latest` run
 | Dashboard | Playwright `1.49.1`: Chromium, Firefox, WebKit (`scripts/dashboard_e2e.js`) | Linux (all three, in the `End to end` CI job on Ubuntu 24.04); macOS (Chromium and WebKit; Firefox does not launch there) | rendering, text shown as text, CSP, no token in URL, storage or Referer, filters, trace, phone width, dark theme, bad token, foreign Host |
 | TUI | `loghaven tui` in a pseudo-terminal against a live daemon (`tui.sh`) | Linux, macOS | redraw after a resize (shrink and grow), polling error while the daemon is killed, reconnect and a new record after it restarts, exit 0 on `q` |
 | End to end | `scripts/e2e.sh`: daemon, dashboard (Chromium), chain adapters against the fake nodes | macOS and Windows (GitHub-hosted `macos-latest`, `windows-latest` under Git Bash), plus Linux | sessions across restart and a hard kill, foreign Host refused, dashboard, mock chains. On Windows the hard kill is `loghaven stop --force` and the TUI check is skipped (no `pty` module) |
+| Public chains | Ethereum (publicnode, WETH logs), Solana (`api.mainnet-beta.solana.com`, USDC mint), Stellar (`horizon.stellar.org`, 5 busy accounts) (`public.sh`) | macOS, 30 min on 2026-11-22 | both halves of a run with a restart in the middle: 7 825 Ethereum, 1 145 Solana and 9 822 Stellar records, none twice (Ethereum keyed on tx and log index), watchers running at the end; one HTTP 429 and one dropped request, both handled |
 | Load | the daemon, UDP ingest from a Python sender (`load.sh`) | Linux, macOS | 500 to 20 000 records/s for 10 s each, loss and duplicates counted; `kill -9` under load |
 | Disk full | the daemon on a 16 MiB volume (`diskfull.sh`) | macOS only (the script needs `sudo mount` on Linux, not run) | writes fail, the daemon stays up, stored records stay queryable, writes resume |
 | Store cut | MinIO stopped and started under the daemon (`storecut.sh`) | Linux, macOS | store down between uploads; store cut during a 100 MiB upload |
@@ -40,7 +41,7 @@ Run on 2026-11-21 and 2026-11-22. "Linux" is a GitHub-hosted `ubuntu-latest` run
 - **`wss://` against a node of our own.** Anvil has no TLS and the watcher trusts only the built-in public roots. `wss://` was run against a public node earlier (see `docs/CONFIGURATION.md`).
 - **Disk full on Linux**, load above what the Python sender can produce, and load with several apps at once.
 - **The dashboard on a real phone or an older browser version**; only the engines Playwright 1.49.1 ships were run.
-- **Public chains for longer than a spot run** are planned in `docs/PLAN.md` and have no results yet.
+- **Public chains for 2 hours**, and on a Linux runner: the 30 minute run was done once, by hand, on a laptop.
 - **The TUI on Windows**: there is no pseudo-terminal test there. The Windows hard-kill check uses `loghaven stop --force`, not an external `taskkill`.
 
 ## Bugs these runs found
@@ -48,6 +49,7 @@ Run on 2026-11-21 and 2026-11-22. "Linux" is a GitHub-hosted `ubuntu-latest` run
 - **Stellar, HTTP 429 while listing accounts** (fixed): a poll threw away every account it had read when Horizon rate-limited one listing, and failed at the same place again. It now keeps what was read.
 - **Failed upload never retried** (fixed): after the store came back, a chunk whose upload had failed was uploaded only when the app wrote another chunk or the daemon restarted. An app that went quiet kept the chunk forever. The writer now retries once a minute.
 - **Dashboard in Firefox:** no product bug. Firefox does not report a CSP violation to the page console, so the script's check failed; it now listens for the page's `securitypolicyviolation` event, which all three engines raise. The inline script was blocked in every browser.
+- **Stellar, gzip** (fixed): public Horizon answered a 429 ("Send 'Accept-Encoding: gzip' to avoid this limit") to a request for a large page, and our HTTP client did not send that header. It does now. Whether this removes the 429 in the watcher was not isolated: the watcher's own requests were not rate-limited in either 30 minute attempt.
 - Everything else that failed in the first runs was a mistake in the test (a first run starts at the tip by design; podman cannot mount `/tmp` on macOS; the Solana watcher reads finalized transactions, so the test has to wait for finality; a faucet that drops airdrops).
 
 ## Running them
