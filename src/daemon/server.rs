@@ -67,6 +67,7 @@ impl DaemonServer {
 
         if let Some(parent) = self.socket_path.parent() {
             std::fs::create_dir_all(parent)?;
+            ensure_private_if_chosen_for_length(parent)?;
         }
 
         check_socket_path_len(&self.socket_path)?;
@@ -281,13 +282,34 @@ mod tests {
     }
 }
 
-/// `sun_path` holds 104 bytes on Apple and BSD targets and 108 elsewhere, including the final NUL.
 #[cfg(unix)]
-const SUN_PATH_MAX: usize = if cfg!(target_vendor = "apple") {
-    104
-} else {
-    108
-};
+use crate::config::defaults::SUN_PATH_MAX;
+
+/// The folder `defaults::socket_path` picks when the default is too long lives in a temp
+/// directory that other users can write to, so it must be ours and closed to everyone else.
+#[cfg(unix)]
+fn ensure_private_if_chosen_for_length(dir: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let chosen = dir.file_name().is_some_and(|n| {
+        n.to_string_lossy()
+            .starts_with(crate::config::defaults::SHORT_SOCKET_DIR_PREFIX)
+    });
+    if !chosen {
+        return Ok(());
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    let me = dirs::home_dir()
+        .and_then(|h| std::fs::metadata(h).ok())
+        .map(|m| m.uid());
+    if !meta.is_dir() || me.is_some_and(|uid| uid != meta.uid()) {
+        return Err(LogHavenError::Daemon(format!(
+            "{} exists but is not a folder of yours; set daemon.socket_path in the config",
+            dir.display()
+        )));
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
 
 #[cfg(unix)]
 fn check_socket_path_len(path: &std::path::Path) -> Result<()> {
@@ -308,6 +330,26 @@ fn check_socket_path_len(path: &std::path::Path) -> Result<()> {
 mod socket_path_tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn a_folder_chosen_for_length_is_made_private_and_others_are_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("lh-sock-{}", std::process::id()));
+        let chosen = base.join(format!(
+            "{}abc",
+            crate::config::defaults::SHORT_SOCKET_DIR_PREFIX
+        ));
+        let plain = base.join("plain");
+        for d in [&chosen, &plain] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755)).unwrap();
+            ensure_private_if_chosen_for_length(d).unwrap();
+        }
+        let mode = |d: &PathBuf| std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&chosen), 0o700);
+        assert_eq!(mode(&plain), 0o755);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn socket_path_at_the_limit_is_accepted_and_one_more_byte_is_not() {

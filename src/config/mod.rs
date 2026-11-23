@@ -1,4 +1,4 @@
-mod defaults;
+pub(crate) mod defaults;
 mod validation;
 pub use validation::{
     is_base58, is_stellar_account, validate_ethereum, validate_solana, validate_stellar,
